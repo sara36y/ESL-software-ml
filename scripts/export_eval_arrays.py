@@ -43,11 +43,15 @@ FEATURE_DIM   = 156
 EMOTION_DIM   = 7
 NEUTRAL_IDX   = 4      # "neutral" position in EMOTION_CLASSES
 
-ROOT            = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from src.paths import artifacts_dir, label2idx_path  # noqa: E402
+
 LANDMARKS_DIR   = os.path.join(ROOT, "data", "landmarks")
 AUG_DIR         = os.path.join(ROOT, "data", "augmented_landmarks")
-ARTIFACTS_DIR   = os.path.join(ROOT, "artifacts")
-LABEL2IDX_PATH  = os.path.join(ARTIFACTS_DIR, "label2idx.json")
+ARTIFACTS_DIR   = str(artifacts_dir())
+LABEL2IDX_PATH  = str(label2idx_path())
 
 AUG_SUFFIXES    = ("_aug_flip", "_aug_slow", "_aug_fast", "_aug_noise")
 

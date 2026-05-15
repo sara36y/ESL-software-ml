@@ -14,6 +14,8 @@ Usage:
 
 import os
 import time
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -22,6 +24,20 @@ import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 
 os.makedirs("results", exist_ok=True)
+
+_ROOT_SRC = Path(__file__).resolve().parent
+_REPO_ROOT = _ROOT_SRC.parent
+import sys
+
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.paths import artifacts_dir  # noqa: E402
+
+
+def _artifact_paths():
+    """Resolved artifacts dir (artifacts/ or output/artifacts/)."""
+    return artifacts_dir()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -36,14 +52,17 @@ def load_arrays():
     input — model_v1 is trained with X_v1 that also has NEUTRAL_EMO concat.
     """
     import json
-    with open("artifacts/label2idx.json", "r", encoding="utf-8") as f:
+
+    arts = _artifact_paths()
+
+    with open(arts / "label2idx.json", "r", encoding="utf-8") as f:
         label2idx = json.load(f)
     idx2label = {int(v): k for k, v in label2idx.items()}
     class_names = [idx2label[i] for i in range(len(idx2label))]
 
-    X_mlp_val  = np.load("artifacts/X_mlp_val.npy")
-    X_lstm_val = np.load("artifacts/X_lstm_val.npy")
-    y_val      = np.load("artifacts/y_val.npy")
+    X_mlp_val  = np.load(arts / "X_mlp_val.npy")
+    X_lstm_val = np.load(arts / "X_lstm_val.npy")
+    y_val      = np.load(arts / "y_val.npy")
 
     return class_names, X_mlp_val, X_lstm_val, y_val
 
@@ -68,18 +87,20 @@ def run_ablation(class_names, X_mlp_val, X_lstm_val, y_val):
     """
     import tensorflow as tf
 
+    arts = _artifact_paths()
+
     variants = [
-        ("v1: Baseline MLP (no aug)",    "artifacts/model_v1.keras", X_mlp_val),
-        ("v2: Aug MLP + Emotion",        "artifacts/model_v2.keras", X_mlp_val),
-        ("v3: Aug LSTM + Emotion",       "artifacts/model_v3.keras", X_lstm_val),
+        ("v1: Baseline MLP (no aug)",    arts / "model_v1.keras", X_mlp_val),
+        ("v2: Aug MLP + Emotion",        arts / "model_v2.keras", X_mlp_val),
+        ("v3: Aug LSTM + Emotion",       arts / "model_v3.keras", X_lstm_val),
     ]
 
     rows = []
     for name, path, X in variants:
-        if not os.path.exists(path):
+        if not path.is_file():
             print(f"  SKIP {name} — {path} not found")
             continue
-        model   = tf.keras.models.load_model(path)
+        model   = tf.keras.models.load_model(str(path))
         _, acc  = model.evaluate(X, y_val, verbose=0)
         y_pred  = np.argmax(model.predict(X, verbose=0), axis=1)
         f1      = f1_score(y_val, y_pred, average="macro", zero_division=0)
@@ -309,9 +330,11 @@ def main():
     print("\n" + df_ablation.to_string(index=False))
 
     # 2. Confusion matrix (use primary model: v2)
-    if os.path.exists("artifacts/model_v2.keras"):
+    arts = _artifact_paths()
+    mv2 = arts / "model_v2.keras"
+    if mv2.is_file():
         print("\n── Confusion Matrix ──────────────────────────────────────────")
-        model_v2 = tf.keras.models.load_model("artifacts/model_v2.keras")
+        model_v2 = tf.keras.models.load_model(str(mv2))
         confused_pairs, y_pred = plot_confusion_matrix(
             model_v2, X_mlp_val, y_val, class_names,
         )
@@ -323,6 +346,9 @@ def main():
         # 4. Failure analysis
         print("\n── Failure Analysis ──────────────────────────────────────────")
         plot_failure_analysis(confused_pairs, X_mlp_val, y_val, class_names)
+
+    else:
+        print(f"\n── Confusion Matrix — SKIPPED ─ {mv2} not found ─")
 
     print("\n" + "=" * 65)
     print("Evaluation complete. All outputs in results/")

@@ -4,7 +4,12 @@ src/inference.py
 predict_frame() interface contract
 
 Interface contract (must never change shape without notifying Software team):
-    predict_frame(frame: np.ndarray) -> tuple[str, float, str]
+    predict_frame(
+        frame: np.ndarray,
+        cached_emotion: str | None = None,
+        *,
+        raw: bool = False,
+    ) -> tuple[str, float, str]
     Returns: (label, confidence, emotion)
 
 Software team: during Phase 2 setup, replace with the stub at the bottom of
@@ -15,6 +20,8 @@ import numpy as np
 import cv2
 import threading
 from collections import deque
+
+from src.paths import artifacts_dir, label2idx_path, model_path
 
 # ── Optional heavy imports — deferred until load_model() is called ────────────
 _tf      = None
@@ -31,8 +38,12 @@ EMOTION_CLASSES  = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surp
 EMOTION_DIM      = 7
 NEUTRAL_IDX      = EMOTION_CLASSES.index("neutral")  # 4
 
-MODEL_PATH       = "artifacts/model_v2.keras"
-LABEL2IDX_PATH   = "artifacts/label2idx.json"
+def _default_model_path() -> str:
+    return str(model_path("model_v2.keras"))
+
+
+def _default_label_path() -> str:
+    return str(label2idx_path())
 
 VELOCITY_THRESHOLD = 0.02   # tune empirically; increase if too many false activations
 WINDOW_SIZE        = 5
@@ -68,7 +79,12 @@ _model_loaded = False
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def load_model(model_path: str = MODEL_PATH, label_path: str = LABEL2IDX_PATH) -> None:
+def load_model(
+    model_path_arg: str | None = None,
+    label_path: str | None = None,
+) -> None:
+    model_path_arg = model_path_arg or _default_model_path()
+    label_path = label_path or _default_label_path()
     """
     Load the Keras model, label map, and initialise MediaPipe Holistic.
     Must be called once before predict_frame().
@@ -81,7 +97,7 @@ def load_model(model_path: str = MODEL_PATH, label_path: str = LABEL2IDX_PATH) -
     _tf = tf
     _mp = mp
 
-    _model    = tf.keras.models.load_model(model_path)
+    _model    = tf.keras.models.load_model(model_path_arg)
     import json
     with open(label_path, "r", encoding="utf-8") as f:
         label2idx = json.load(f)
@@ -98,8 +114,8 @@ def load_model(model_path: str = MODEL_PATH, label_path: str = LABEL2IDX_PATH) -
         raise ValueError(
             f"[inference] Model input dim mismatch: expected {expected_dim} "
             f"(= FEATURE_DIM {FEATURE_DIM} + EMOTION_DIM {EMOTION_DIM}) "
-            f"but {model_path} has input_shape={_model.input_shape}. "
-            f"Point MODEL_PATH at model_v2.keras (MLP + emotion)."
+            f"but {model_path_arg} has input_shape={_model.input_shape}. "
+            f"Place model_v2.keras in {artifacts_dir()} (MLP + emotion)."
         )
 
     # static_image_mode=False → optimised for video streams (Phase 2)
@@ -143,68 +159,101 @@ def update_emotion_async(frame: np.ndarray) -> None:
         pass
 
 
-def predict_frame(frame: np.ndarray) -> tuple:
+def _resolve_emotion(cached_emotion: str | None) -> str:
+    """Explicit cached_emotion (sprint/web) overrides DeepFace cache."""
+    if cached_emotion is not None:
+        return cached_emotion
+    with _emotion_lock:
+        return _cached_emotion
+
+
+def predict_frame(
+    frame: np.ndarray,
+    cached_emotion: str | None = None,
+    *,
+    raw: bool = False,
+) -> tuple:
     """
     Main interface contract.
 
     Args:
         frame: BGR numpy array (from cv2.VideoCapture or WebSocket decode)
+        cached_emotion: If set (e.g. "neutral" for sprint/web), use for one-hot
+            concat instead of the DeepFace thread cache. None = full mode.
+        raw: Sprint mode — per-frame class label, no internal sliding window.
+            Uses "__no_hands__" when no hands (instruction.md contract).
+
     Returns:
         (label: str, confidence: float, emotion: str)
 
-    States returned in label:
-        "No hand detected"  — hand not visible
-        "Ready"             — hand still, waiting for motion
-        "Detecting"         — motion detected but window not yet committed
-        "<SIGN_LABEL>"      — committed prediction
+    Full mode label states:
+        "No hand detected", "Ready", "Detecting", or committed "<SIGN_LABEL>"
+    Raw mode label states:
+        "__no_hands__" or "<SIGN_LABEL>" with softmax confidence
     """
-    global _lm_prev
-
     if not _model_loaded:
         raise RuntimeError("Call load_model() before predict_frame()")
 
-    # ── 1. Resize for speed ───────────────────────────────────────────────────
+    emotion_str = _resolve_emotion(cached_emotion)
+
     small = cv2.resize(frame, (320, 240))
-
-    # ── 2. Extract landmarks ──────────────────────────────────────────────────
     raw_lm = _extract_landmarks(small)
-    if raw_lm[:126].sum() == 0:
-        return ("No hand detected", 0.0, "neutral")
 
-    # ── 3. Activation gate ────────────────────────────────────────────────────
+    if raw_lm[:126].sum() == 0:
+        no_hand = "__no_hands__" if raw else "No hand detected"
+        return (no_hand, 0.0, emotion_str)
+
+    if raw:
+        norm_lm = _normalize(raw_lm)
+        features = np.concatenate(
+            [norm_lm, _emotion_to_onehot(emotion_str)]
+        ).reshape(1, -1)
+        probs = _model(features, training=False)[0].numpy()
+        class_idx = int(np.argmax(probs))
+        return (_idx2label[class_idx], float(probs[class_idx]), emotion_str)
+
     moving = _activation_gate(raw_lm)
     if not moving:
-        with _emotion_lock:
-            emo = _cached_emotion
-        return ("Ready", 0.0, emo)
+        return ("Ready", 0.0, emotion_str)
 
-    # ── 4. Normalise ──────────────────────────────────────────────────────────
     norm_lm = _normalize(raw_lm)
+    features = np.concatenate(
+        [norm_lm, _emotion_to_onehot(emotion_str)]
+    ).reshape(1, -1)
 
-    # ── 5. Attach emotion vector ──────────────────────────────────────────────
-    with _emotion_lock:
-        emotion_str = _cached_emotion
-    features = np.concatenate([norm_lm, _emotion_to_onehot(emotion_str)]).reshape(1, -1)
-
-    # ── 6. Model inference ────────────────────────────────────────────────────
-    probs      = _model(features, training=False)[0].numpy()
-    class_idx  = int(np.argmax(probs))
+    probs = _model(features, training=False)[0].numpy()
+    class_idx = int(np.argmax(probs))
     confidence = float(probs[class_idx])
-    label      = _idx2label[class_idx]
+    label = _idx2label[class_idx]
 
-    # ── 7. Sliding window majority vote ───────────────────────────────────────
     _pred_window.append((label, confidence))
     if len(_pred_window) == WINDOW_SIZE:
         labels = [p[0] for p in _pred_window]
-        confs  = [p[1] for p in _pred_window]
-        top    = max(set(labels), key=labels.count)
-        if (labels.count(top) >= MIN_VOTES
-                and np.mean(confs) >= MIN_CONFIDENCE):
+        confs = [p[1] for p in _pred_window]
+        top = max(set(labels), key=labels.count)
+        if labels.count(top) >= MIN_VOTES and np.mean(confs) >= MIN_CONFIDENCE:
             mod = EMOTION_CONFLICTS.get((top.lower(), emotion_str.lower()), 1.0)
             _pred_window.clear()
             return (top, float(np.mean(confs)) * mod, emotion_str)
 
     return ("Detecting", float(confidence), emotion_str)
+
+
+def get_raw_landmarks(frame: np.ndarray) -> np.ndarray | None:
+    """
+    Extract the 156-dim raw landmark vector for a BGR frame.
+    Returns None if the model is not loaded. Hands-only velocity uses [:126].
+    """
+    if not _model_loaded:
+        raise RuntimeError("Call load_model() before get_raw_landmarks()")
+    small = cv2.resize(frame, (320, 240))
+    return _extract_landmarks(small)
+
+
+def reset_activation_gate() -> None:
+    """Reset velocity gate state (sprint demo between signs)."""
+    global _lm_prev
+    _lm_prev = None
 
 
 def get_holistic():
@@ -227,9 +276,8 @@ def get_last_mp_results():
 
 def reset_window() -> None:
     """Clear prediction window — call when the user explicitly resets."""
-    global _lm_prev
     _pred_window.clear()
-    _lm_prev = None
+    reset_activation_gate()
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

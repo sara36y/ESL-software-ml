@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ESL — Live Recognition</title>
+  <link rel="manifest" href="/manifest.json"/>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, sans-serif; background:#0f111a; color:#e8eaf0;
+      min-height: 100vh; display:flex; flex-direction:column; align-items:center;
+      padding: 12px;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 8px 0 4px; }
+    .sub { font-size: .8rem; color:#8b90a0; margin-bottom: 12px; }
+    .wrap { display:flex; flex-wrap:wrap; gap:12px; justify-content:center; max-width:900px; }
+    video, canvas { border-radius:8px; background:#000; max-width:100%; }
+    #overlay { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
+    .panel {
+      position:relative; background:#1a1d2e; border-radius:12px; padding:12px;
+      box-shadow:0 4px 24px rgba(0,0,0,.35);
+    }
+    .status {
+      margin-top:10px; padding:10px 12px; border-radius:8px; font-size:.95rem;
+      background:#252838; min-height:2.5em;
+    }
+    .bar { height:8px; background:#333; border-radius:4px; margin-top:8px; overflow:hidden; }
+    .bar > div { height:100%; background:#3dd68c; width:0%; transition: width .12s; }
+    .emo { font-size:.85rem; color:#a0a8c0; margin-top:6px; }
+    .conn { font-size:.75rem; color:#6b7280; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h1>ESL — Egyptian Sign Language</h1>
+  <p class="sub">WebSocket demo · neutral emotion · same model as desktop</p>
+  <div class="wrap">
+    <div class="panel">
+      <video id="video" width="320" height="240" autoplay playsinline muted></video>
+      <canvas id="send" width="320" height="240" style="display:none"></canvas>
+    </div>
+    <div class="panel" style="min-width:280px; flex:1;">
+      <div class="status" id="status">Connecting…</div>
+      <div class="bar"><div id="barfill"></div></div>
+      <div class="emo" id="emotion">Emotion: —</div>
+      <div class="conn" id="conn">WebSocket: —</div>
+    </div>
+  </div>
+<script>
+(function(){
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('send');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const bar = document.getElementById('barfill');
+  const emoEl = document.getElementById('emotion');
+  const connEl = document.getElementById('conn');
+
+  const wsUrl = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws';
+  let ws = null;
+  let reconnectTimer = null;
+
+  function setStatus(t, kind) {
+    statusEl.textContent = t;
+    statusEl.style.color = kind === 'ok' ? '#3dd68c'
+      : kind === 'warn' ? '#fbbf24' : kind === 'err' ? '#f87171' : '#e8eaf0';
+  }
+
+  navigator.mediaDevices.getUserMedia({ video: { width:320, height:240 }, audio:false })
+    .then(stream => { video.srcObject = stream; })
+    .catch(() => setStatus('Camera blocked — allow access', 'err'));
+
+  function connect() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    connEl.textContent = 'Connecting to ' + wsUrl + '…';
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      connEl.textContent = 'WebSocket: connected';
+      setStatus('Waiting — show hands', 'warn');
+    };
+    ws.onmessage = (ev) => {
+      const d = JSON.parse(ev.data);
+      emoEl.textContent = 'Emotion: ' + (d.emotion || 'neutral');
+      const c = typeof d.confidence === 'number' ? d.confidence : 0;
+      bar.style.width = (Math.min(c, 1) * 100).toFixed(0) + '%';
+
+      let lbl = d.label || '';
+      if (lbl === 'No hand detected' || lbl === '__no_hands__')
+        setStatus('Waiting — no hand detected', 'warn');
+      else if (lbl === 'Ready')
+        setStatus('Ready — show a sign', 'neutral');
+      else if (lbl === 'Detecting')
+        setStatus('Detecting…', 'warn');
+      else if (lbl === 'Error')
+        setStatus('Server error — check logs', 'err');
+      else
+        setStatus('Sign: ' + lbl + '  (' + (c * 100).toFixed(0) + '%)', 'ok');
+    };
+    ws.onclose = () => {
+      connEl.textContent = 'WebSocket: disconnected — retry in 2s';
+      setStatus('Reconnecting…', 'warn');
+      reconnectTimer = setTimeout(connect, 2000);
+    };
+    ws.onerror = () => { /* onclose handles retry */ };
+  }
+  connect();
+
+  setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!video.videoWidth) return;
+    ctx.drawImage(video, 0, 0, 320, 240);
+    const b64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+    ws.send(b64);
+  }, 100);
+})();
+</script>
+</body>
+</html>

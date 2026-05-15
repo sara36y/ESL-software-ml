@@ -20,6 +20,13 @@ import time
 
 import numpy as np
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from src.paths import artifacts_dir as _artifacts_dir  # noqa: E402
+
+_AD = _artifacts_dir()
+
 
 def convert(source: str, dest: str) -> None:
     import tensorflow as tf
@@ -57,9 +64,9 @@ def validate(source: str, dest: str, n_samples: int = 20) -> None:
     out_details = interpreter.get_output_details()[0]
 
     # Prefer real val data if it's there; else random.
-    val_path = "artifacts/X_mlp_val.npy"
-    if keras_model.input_shape[1:] == (163,) and os.path.exists(val_path):
-        X = np.load(val_path).astype(np.float32)
+    val_path = _AD / "X_mlp_val.npy"
+    if keras_model.input_shape[1:] == (163,) and val_path.is_file():
+        X = np.load(str(val_path)).astype(np.float32)
         X = X[:n_samples]
     else:
         shape = (n_samples,) + tuple(d or 1 for d in keras_model.input_shape[1:])
@@ -99,8 +106,8 @@ def validate(source: str, dest: str, n_samples: int = 20) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Convert Keras model to TFLite.")
-    p.add_argument("--source",   default="artifacts/model_v2.keras")
-    p.add_argument("--dest",     default="artifacts/model_v2.tflite")
+    p.add_argument("--source",   default=str(_AD / "model_v2.keras"))
+    p.add_argument("--dest",     default=str(_AD / "model_v2.tflite"))
     p.add_argument("--validate", action="store_true",
                    help="After conversion, run 20 samples through both and report drift.")
     args = p.parse_args()

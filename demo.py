@@ -386,6 +386,128 @@ def run(source):
     print("[app] Shutdown complete.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Sprint mode — single loop, neutral emotion, smoothing in app layer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SPRINT_WINDOW_SIZE    = 5
+SPRINT_MIN_VOTES      = 3
+SPRINT_MIN_CONFIDENCE = 0.65
+SPRINT_EMOTION        = "neutral"
+
+
+def _sprint_smooth(window: deque, lbl: str, conf: float) -> tuple[str | None, float]:
+    window.append((lbl, conf))
+    if len(window) < SPRINT_WINDOW_SIZE:
+        return None, 0.0
+    labels = [p[0] for p in window]
+    confs = [p[1] for p in window]
+    top = max(set(labels), key=labels.count)
+    if labels.count(top) >= SPRINT_MIN_VOTES and np.mean(confs) >= SPRINT_MIN_CONFIDENCE:
+        return top, float(np.mean(confs))
+    return None, 0.0
+
+
+def run_sprint(source):
+    """Single-loop desktop app (.cursor/instruction.md sprint architecture)."""
+    from src.landmark_gate import gate_from_frame, reset_gate
+
+    print("[sprint] Loading model…")
+    load_model()
+    print("[sprint] Model ready. Press Q to quit, L for landmarks, D for debug.")
+
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        print(f"[sprint] ERROR: Cannot open source '{source}'")
+        return
+
+    pred_window = deque(maxlen=SPRINT_WINDOW_SIZE)
+    show_landmarks = True
+    show_debug = False
+    fps_deque = deque(maxlen=FPS_WINDOW)
+    t_last = time.perf_counter()
+
+    cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WIN_NAME, 800, 520)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        active, raw = gate_from_frame(frame)
+
+        if raw is None or raw[:126].sum() == 0:
+            lbl, conf = "__no_hands__", 0.0
+        elif not active:
+            lbl, conf = "__still__", 0.0
+        else:
+            lbl, conf, _ = predict_frame(frame, SPRINT_EMOTION, raw=True)
+
+        if lbl == "__no_hands__":
+            status = "No hand detected — move closer"
+            colour = C_GREY
+            pred_window.clear()
+        elif lbl == "__still__" or not active:
+            status = "Ready — show a sign"
+            colour = C_WHITE
+            pred_window.clear()
+        else:
+            committed, avg_conf = _sprint_smooth(pred_window, lbl, conf)
+            if committed:
+                status = f"Sign: {committed}  ({avg_conf:.0%})"
+                colour = C_GREEN
+            elif conf < SPRINT_MIN_CONFIDENCE:
+                status = "Detecting..."
+                colour = C_YELLOW
+            else:
+                status = "Detecting..."
+                colour = C_YELLOW
+
+        now = time.perf_counter()
+        fps_deque.append(now - t_last)
+        t_last = now
+        fps = 1.0 / (sum(fps_deque) / len(fps_deque)) if fps_deque else 0.0
+
+        disp = frame.copy()
+        if show_landmarks and _HAS_MP:
+            mp_results = get_last_mp_results()
+            if mp_results is not None:
+                draw_landmarks(disp, mp_results)
+
+        h, w = disp.shape[:2]
+        draw_rounded_rect(disp, 0, h - 70, w, h, C_OVERLAY, alpha=0.7)
+        cv2.putText(disp, status, (20, h - 40), FONT, 0.75, colour, 2, cv2.LINE_AA)
+        cv2.putText(
+            disp, f"Emotion: {SPRINT_EMOTION}", (20, h - 12),
+            FONT, 0.55, C_GREY, 1, cv2.LINE_AA,
+        )
+        fps_text = f"{fps:.1f} FPS"
+        (tw, _), _ = cv2.getTextSize(fps_text, FONT, 0.5, 1)
+        cv2.putText(disp, fps_text, (w - tw - 10, 22), FONT, 0.5, C_WHITE, 1, cv2.LINE_AA)
+
+        if show_debug:
+            dbg = f"raw: {lbl} {conf:.2f}"
+            cv2.putText(disp, dbg, (20, 55), FONT, 0.5, C_YELLOW, 1, cv2.LINE_AA)
+
+        cv2.imshow(WIN_NAME, disp)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+        if key == ord("l"):
+            show_landmarks = not show_landmarks
+        if key == ord("d"):
+            show_debug = not show_debug
+        if key == ord("r"):
+            pred_window.clear()
+            reset_gate()
+            reset_window()
+
+    cap.release()
+    cv2.destroyAllWindows()
+    print("[sprint] Shutdown complete.")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -395,10 +517,18 @@ def parse_args():
         "--source", default="0",
         help="Camera index (0, 1, …) or path to video file. Default: 0",
     )
+    p.add_argument(
+        "--sprint",
+        action="store_true",
+        help="Sprint mode: single loop, neutral emotion, no DeepFace thread",
+    )
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    args   = parse_args()
-    source = int(args.source) if args.source.isdigit() else args.source
-    run(source)
+    args = parse_args()
+    source = int(args.source) if str(args.source).isdigit() else args.source
+    if args.sprint:
+        run_sprint(source)
+    else:
+        run(source)

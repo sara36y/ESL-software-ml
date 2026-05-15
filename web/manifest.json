@@ -1,0 +1,9 @@
+{
+  "name": "ESL Sign Recognition",
+  "short_name": "ESL",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f111a",
+  "theme_color": "#1a1d2e",
+  "description": "Real-time Egyptian Sign Language recognition (local)"
+}
