@@ -4,6 +4,8 @@
 
 **Note:** Canonical Python code lives under `src/`. The `output/` tree is an optional **compatibility mirror** for Colab handoff (`output/artifacts/` + `output/src/inference.py` re-exports). Prefer `artifacts/` at repo root — see [artifacts/README.md](artifacts/README.md).
 
+**Python:** Use **3.10 or 3.11** only (TensorFlow). On Windows run `setup_venv.ps1` after installing Python 3.11 — see [README.md](../README.md#one-time-environment-windows).
+
 ---
 
 ## What Cursor needs to know about this project

@@ -30,10 +30,21 @@ Thread 3 (Emotion)  ─── DeepFace every 5 frames ──→ _cached_emotion
 
 ## Prerequisites
 
-- Python **3.10–3.11** strongly recommended (`tensorflow` in `requirements.txt` does not support Python 3.13 yet)
+- Python **3.10 or 3.11 only** for this repo (`pyproject.toml` sets `requires-python = ">=3.10,<3.13"`; TensorFlow wheels on Windows do not support **3.13** today — using 3.13 as your default `python` causes install/import failures).
 - `artifacts/model_v2.keras` (or the same files under `output/artifacts/`) — from Phase 1 notebook
 - `artifacts/label2idx.json` — class index map (see [artifacts/README.md](artifacts/README.md))
 - Webcam (built-in or USB)
+
+### One-time environment (Windows)
+
+If `python --version` shows 3.12+ or 3.13, install [Python 3.11](https://www.python.org/downloads/) and enable **Add python.exe to PATH**, then:
+
+```powershell
+cd path\to\esl_project
+.\setup_venv.ps1
+```
+
+After that, **`run_demo.ps1` / `run_web.ps1` use `.venv`** (or `py -3.11` if you have no venv yet). A **`.python-version`** file (`3.11`) helps pyenv/pyenv-win pick the right interpreter.
 
 ---
 
@@ -60,7 +71,16 @@ esl_project/
 ├── demo.py                    # Desktop app entry point
 ├── run_demo.sh / run_demo.ps1
 ├── run_web.sh   / run_web.ps1
+├── setup_venv.sh / setup_venv.ps1  # one-time: create .venv with 3.10/3.11 + pip install
+├── pyproject.toml              # requires-python >=3.10,<3.13
+├── .python-version             # 3.11 (pyenv / editor hint)
 ├── requirements.txt
+├── scripts/
+│   ├── esl_python.ps1          # Windows: resolve 3.10/3.11 for run_*.ps1
+│   ├── export_eval_arrays.py  # Regenerates X/y arrays + y_val.npy
+│   ├── export_tflite.py       # Keras -> TFLite conversion (+ --validate)
+│   └── smoke_check.py         # Quick load_model / predict sanity (no webcam)
+│
 ├── output/                    # Optional mirror for Colab / Cursor sprint imports
 │   ├── artifacts/             # copy or symlink of artifacts/
 │   └── src/inference.py       # re-exports src.inference
@@ -74,10 +94,6 @@ esl_project/
 │   ├── landmark_gate.py       # sprint activation gate helpers
 │   ├── augmentation.py        # Data augmentation
 │   └── evaluate.py            # Evaluation suite
-├── scripts/
-│   ├── export_eval_arrays.py  # Regenerates X/y arrays + y_val.npy
-│   ├── export_tflite.py       # Keras -> TFLite conversion (+ --validate)
-│   └── smoke_check.py         # Quick load_model / predict sanity (no webcam)
 │
 ├── artifacts/                 # Primary model location (or use output/artifacts/)
 │   ├── model_v1.keras         # Baseline MLP (no augmentation)

@@ -26,7 +26,8 @@ def main() -> int:
     except ModuleNotFoundError:
         print(
             "[smoke] SKIP load_model - tensorflow not installed. "
-            "Use Python 3.10-3.11 and pip install -r requirements.txt",
+            "Use Python 3.10-3.11, run setup_venv.ps1 (Windows) or setup_venv.sh, "
+            "then: pip install -r requirements.txt",
         )
         return 0
 

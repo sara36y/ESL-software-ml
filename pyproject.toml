@@ -1,0 +1,10 @@
+[project]
+name = "esl-project"
+version = "0.1.0"
+description = "Egyptian Sign Language real-time recognition (graduation project)"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+
+[tool.ruff]
+# Optional: if you add ruff later
+line-length = 100

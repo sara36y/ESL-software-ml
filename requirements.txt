@@ -1,7 +1,9 @@
 # ESL Real-Time Sign Language Recognition
 # Install: pip install -r requirements.txt
 #
-# Python 3.10-3.11 recommended.
+# Supported: Python 3.10 or 3.11 (see pyproject.toml requires-python).
+# Python 3.13 is not supported by the TensorFlow version range below on Windows.
+# Windows: run .\setup_venv.ps1 once after installing Python 3.11.
 # GPU is NOT required - all inference runs on CPU.
 
 # -- Core ML -----------------------------------------------------------
