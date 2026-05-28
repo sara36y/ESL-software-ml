@@ -64,6 +64,7 @@ _idx2label    = None
 _holistic     = None
 _lm_prev      = None
 _pred_window  = deque(maxlen=WINDOW_SIZE)
+_frame_ts_ms  = 0
 
 _cached_emotion = "neutral"
 _emotion_lock   = threading.Lock()
@@ -118,12 +119,14 @@ def load_model(
             f"Place model_v2.keras in {artifacts_dir()} (MLP + emotion)."
         )
 
-    # static_image_mode=False → optimised for video streams (Phase 2)
-    _holistic = mp.solutions.holistic.Holistic(
-        static_image_mode=False,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
+    holistic_model = str(artifacts_dir() / "holistic_landmarker.task")
+    options = mp.tasks.vision.HolisticLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=holistic_model),
+        running_mode=mp.tasks.vision.RunningMode.VIDEO,
+        min_face_detection_confidence=0.5,
+        min_hand_landmarks_confidence=0.5,
     )
+    _holistic = mp.tasks.vision.HolisticLandmarker.create_from_options(options)
 
     _model_loaded = True
     print(f"[inference] Model loaded — {len(_idx2label)} classes | input dim: {_model.input_shape}")
@@ -292,26 +295,29 @@ def _emotion_to_onehot(emotion: str) -> np.ndarray:
 
 
 def _extract_landmarks(frame: np.ndarray) -> np.ndarray:
-    global _last_mp_results
-    results = _holistic.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    global _last_mp_results, _frame_ts_ms
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb)
+    _frame_ts_ms += 1
+    results = _holistic.detect_for_video(mp_image, _frame_ts_ms)
     _last_mp_results = results
     feat = []
 
     if results.left_hand_landmarks:
-        for lm in results.left_hand_landmarks.landmark:
+        for lm in results.left_hand_landmarks:
             feat.extend([lm.x, lm.y, lm.z])
     else:
         feat.extend([0.0] * 63)
 
     if results.right_hand_landmarks:
-        for lm in results.right_hand_landmarks.landmark:
+        for lm in results.right_hand_landmarks:
             feat.extend([lm.x, lm.y, lm.z])
     else:
         feat.extend([0.0] * 63)
 
     if results.face_landmarks:
         for idx in FACE_IDX:
-            lm = results.face_landmarks.landmark[idx]
+            lm = results.face_landmarks[idx]
             feat.extend([lm.x, lm.y, lm.z])
     else:
         feat.extend([0.0] * 30)

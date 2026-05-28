@@ -1,583 +1,654 @@
-# ESL Real-Time Sign Language Recognition — Project Context
-
-## Project Overview
-
-Real-time Egyptian Sign Language (ESL) recognition system that runs locally on a laptop/PC with a webcam,
-**plus** a Progressive Web App (PWA) layer reachable from a phone browser over Wi-Fi.
-
-The system watches a person sign and displays the recognised sign as text — no human interpreter, no cloud, no internet required for the desktop version.
-
-**Team:** 5 members — 1 team lead (also does AI work), 2 AI members, 2 software members
-**Timeline:** 4 phases, ~87 hours total (including 8-hour buffer)
-**Status:** Phase 1 mostly complete. Two required additions (1A, 1B, 1C) remain before Phase 2 starts.
+# ESL Real-Time Sign Language Recognition — Master Project Context
+> This file is the single source of truth for Claude Code.
+> Read this entire file before writing a single line of code or running any command.
 
 ---
 
-## ⚠️ Critical Risks — Read First
+## Current Project Status (Read This First)
 
-| Priority | Risk | Consequence If Ignored | Fix |
-|----------|------|----------------------|-----|
-| **CRITICAL** | Activation gate skipped "for now" | Demo shows random predictions constantly — kills viva | Task 2.2 must be done before first demo run |
-| **CRITICAL** | No cross-signer testing | Model learned one person's hand shape, not the sign | Record 2–3 extra videos with a 2nd person in Phase 1B |
-| **HIGH** | GPU-less exam environment | FPS drops below 10 on examiner's laptop | TFLite export in Task 2.6 is mandatory, not optional |
-| **HIGH** | Emotion ground truth absent at training time | Neutral placeholder may reduce emotion feature value | Document this limitation explicitly in ablation table and viva |
-| **MEDIUM** | No error handling in threading scaffold | One DeepFace timeout crashes the display thread | Wrap all DeepFace calls in try/except, fall back to "neutral" |
-| **MEDIUM** | Stability test is only 10 minutes | Memory grows during live viva demo | Run overnight test once, log memory every 5 minutes |
-| **LOW** | Git workflow depends on team discipline | Merge conflicts on demo day | Set branch protection on main in GitHub settings today |
+| Item | Status |
+|------|--------|
+| Phase 1 — Data & Model | ✅ COMPLETE. `artifacts/model_v2.keras` + `label2idx.json` exist. |
+| Phase 2 — Desktop App | ✅ COMPLETE. `demo.py` runs with full threading, activation gate, overlays. |
+| Phase 3 — Evaluation | ✅ COMPLETE. `src/evaluate.py` ready. Run after confirming val arrays exist. |
+| Phase 4 — Web Server | ✅ COMPLETE. `web/server.py` is written and working. |
+| Phase 5 — Live Deployment | 🔴 NOT DONE. Server only runs on localhost. Mobile app can't reach it. |
+| Phase 6 — CI/CD Pipeline | 🔴 NOT DONE. No auto-redeploy when model improves. |
 
----
+**The two things blocking the project right now:**
+1. The server is not publicly accessible — the mobile app (on teammate's laptop) cannot connect.
+2. There is no deployment pipeline — improving the model requires manual steps.
 
-## What the System Does
-
-1. Webcam captures live video
-2. MediaPipe Holistic extracts hand/face landmarks every frame
-3. Activation gate checks hand velocity — skips inference when hands are still
-4. Sign classifier (MLP or LSTM) predicts sign from normalised landmarks
-5. DeepFace runs every 5 frames on face crop to detect dominant emotion
-6. Emotion is concatenated as 7-dim one-hot vector to landmark feature before prediction
-7. Sliding window (last 5 frames, majority vote) smooths predictions
-8. Desktop result: `"Sign: HELLO (0.89)  ·  Emotion: happy"`
-9. Web result: same JSON `{ label, confidence, emotion, fps }` sent over WebSocket to browser
-
-**Primary deliverable:** Local Python desktop app (OpenCV window).
-**Secondary deliverable:** FastAPI WebSocket server + HTML/JS PWA frontend.
+**What to build next, in order:**
+1. `scripts/download_model.py` — downloads model from HuggingFace Hub at server startup
+2. `Dockerfile` — packages the server for Railway deployment
+3. `.github/workflows/deploy.yml` — triggers Railway redeploy on every push to `main`
+4. `scripts/promote_model.py` — promotes a new model version to production in one command
 
 ---
 
-## Runtime Architecture
+## The System — Plain English Explanation
 
-### Desktop — Thread Model
+Every time someone signs in front of a camera, this chain runs:
 
-| Thread | Job |
-|--------|-----|
-| Thread 1 — Capture | `cv2.VideoCapture(0)`, pushes to `queue.Queue(maxsize=2)`, drops old frames |
-| Thread 2 — Inference | MediaPipe → activation gate → normalise → `model.predict()` → result queue |
-| Thread 3 — Emotion | `DeepFace.analyze()` every K=5 frames, caches result behind `threading.Lock` |
-| Main thread — Display | Reads result + cached emotion, overlays on frame, `cv2.imshow` |
-
-### Web — Component Model
-
-| Component | Technology | Responsibility |
-|-----------|-----------|---------------|
-| WebSocket Server | FastAPI + uvicorn | Receives JPEG frames from browser, calls `predict_frame()`, returns JSON |
-| Inference Backend | `src/inference.py` (unchanged) | Same `predict_frame()` used by desktop — zero changes to AI pipeline |
-| Frontend | Plain HTML + Vanilla JS | Camera capture, frame encoding, WebSocket comms, canvas overlay |
-| PWA Layer | `manifest.json` + service worker | Makes site installable on Android/iOS home screen over Wi-Fi |
-| HTTPS (mobile) | ngrok tunnel | Required by `getUserMedia()` on phone browsers — one command, no config |
-
-### Interface Contract (between AI and software teams)
-
-```python
-predict_frame(frame: np.ndarray) -> tuple[str, float, str]
-# returns: (label, confidence, emotion_str)
-# stub: return ("HELLO", 0.91, "happy")
+```
+Camera frame (BGR image)
+    ↓
+Resize to 320×240 (speed)
+    ↓
+MediaPipe Holistic extracts 156 numbers
+  — 63 numbers: left hand joint positions (21 joints × x,y,z)
+  — 63 numbers: right hand joint positions (21 joints × x,y,z)
+  — 30 numbers: 10 face landmark positions (× x,y,z)
+    ↓
+Activation gate: measure how much hands moved since last frame
+  — if still → show "Ready — show a sign", skip model
+  — if moving → continue
+    ↓
+Normalize landmarks (wrist → origin, scale by max radial distance)
+    ↓
+Concatenate 7-dim emotion one-hot → 163-dim feature vector
+    ↓
+MLP model predicts: outputs probability for each of the sign classes
+    ↓
+Sliding window: collect last 5 predictions, commit when 3+ agree and mean conf ≥ 0.65
+    ↓
+Output: ("HELLO", 0.89, "neutral")
 ```
 
-Software members build the entire UI against the stub from day one. AI members build the real model behind it. **This contract never changes — the web layer calls the exact same function.**
+The desktop app runs this in Thread 2. The web server runs this on every WebSocket frame.
+They call the exact same function: `predict_frame()` in `src/inference.py`.
 
 ---
 
-## Dataset
+## Interface Contract — Never Change This
 
-- 55 sign classes, 10 videos per class
-- MVP vocabulary: 8–12 signs chosen for first-pass training
-- Train/val split: **video-level 80/20** (never frame-level — that causes data leakage)
-- Landmark format: MediaPipe Holistic — 21 keypoints per hand (42 total), plus optional face
+```python
+# src/inference.py
+predict_frame(
+    frame: np.ndarray,           # BGR image from cv2 or WebSocket decode
+    cached_emotion: str | None,  # None = use DeepFace cache; "neutral" = sprint/web mode
+    *,
+    raw: bool = False,           # True = per-frame label, no sliding window
+) -> tuple[str, float, str]
+# Returns: (label, confidence, emotion_str)
+```
 
-### On Pre-Extracted Landmarks
+**The web server always calls:** `predict_frame(frame, cached_emotion="neutral")`
+**The desktop app calls:** `predict_frame(frame)` (uses DeepFace thread cache)
+**The mobile app receives JSON:** `{"label": "HELLO", "confidence": 0.89, "emotion": "neutral", "latency_ms": 45.2}`
 
-**Golden rule:** Training landmarks and live inference landmarks must come from the same extractor with the same keypoint count and coordinate system. Break this and the model silently predicts wrong answers.
-
-| Scenario | Situation | Action |
-|----------|-----------|--------|
-| A | Dataset has `.npy`/`.csv` landmarks confirmed from MediaPipe Holistic | Skip re-extraction for training. Still need MediaPipe at inference time. |
-| B | Already ran MediaPipe extraction in Phase 1 | Nothing to do. |
-| C | Landmarks from unknown/different tool (OpenPose, etc.) | Re-extract with MediaPipe. 3–4 hrs is cheaper than debugging silent failures. |
-
-Spot-check: load 5–10 files, confirm shape (21 joints per hand), values in 0.0–1.0 range.
+The mobile app integration point is `/ws` WebSocket. It sends base64 JPEG frames, receives JSON.
 
 ---
 
-## Models
+## Emotion — The Honest Truth (Important for Viva)
 
-### Landmark Normalisation (required before any model input)
+The model was trained with `neutral` emotion placeholder for ALL training samples because we had no emotion ground-truth labels. This means:
 
-```python
-# 1. Wrist-centred translation
-lm -= lm[0]  # wrist = (0,0,0)
-# 2. Scale normalisation
-lm /= np.max(np.linalg.norm(lm, axis=1))
-# 3. Flatten to 1-D vector
-features = lm.flatten()  # shape: (126,) for 2 hands × 21 pts × 3 dims
-```
+- The model learned to mostly ignore the 7 emotion dimensions
+- Passing live DeepFace emotion at inference time has minimal effect on accuracy TODAY
+- **The architecture is correct** — the slot exists for when we have real emotion labels
+- For MVP: always pass `"neutral"`. No DeepFace dependency. No crash risk.
 
-### MLP (for static signs)
+**Viva answer:** "We designed the architecture to support emotion fusion — the 7-dimensional feature is in the model input. We used neutral placeholder during training because our dataset has no emotion ground truth. The production upgrade path is: collect emotion-labeled signing data → retrain model_v4 → swap in live DeepFace output. Zero architecture changes needed."
 
-```python
-model = Sequential([
-    Dense(64, activation='relu', input_shape=(D,)),
-    Dropout(0.3),
-    Dense(32, activation='relu'),
-    Dense(num_classes, activation='softmax')
-])
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-model.fit(X, y, epochs=50, callbacks=[EarlyStopping(patience=5)])
-```
+---
 
-### LSTM (for dynamic signs)
+## Critical Constants — Never Change Without Retraining
 
 ```python
-model = Sequential([
-    LSTM(64, input_shape=(N_frames, D_per_frame), return_sequences=False),
-    Dense(32, activation='relu'),
-    Dense(num_classes, activation='softmax')
-])
-```
-
-### Emotion Input (required for model_v2 onwards)
-
-Concatenate a 7-dim one-hot vector to landmark features before prediction.
-Classes (order is fixed — must match training exactly): `angry, disgust, fear, happy, neutral, sad, surprise`
-At training time (no ground-truth emotion labels): use placeholder `neutral` (index 4) for all samples.
-
-```python
+# src/inference.py — these values are burned into model_v2.keras's weights
+FACE_IDX        = [0, 1, 13, 14, 17, 33, 61, 199, 263, 291]  # EXACT ORDER FROM PHASE 1
+FEATURE_DIM     = 156       # 63 left hand + 63 right hand + 30 face
 EMOTION_CLASSES = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
-
-def emotion_to_onehot(dominant_emotion: str) -> np.ndarray:
-    vec = np.zeros(7)
-    idx = EMOTION_CLASSES.index(dominant_emotion) if dominant_emotion in EMOTION_CLASSES else 4
-    vec[idx] = 1.0
-    return vec
-
-# At inference:
-features = np.concatenate([landmark_features, emotion_to_onehot(cached_emotion)])
+EMOTION_DIM     = 7
+NEUTRAL_IDX     = 4         # index of "neutral" in EMOTION_CLASSES
+INPUT_DIM_MLP   = 163       # 156 + 7 — what model_v2.keras expects
+N_FRAMES        = 30        # LSTM only (model_v3)
+VELOCITY_THRESHOLD = 0.02   # tune only if activation gate is too sensitive
+WINDOW_SIZE     = 5
+MIN_VOTES       = 3
+MIN_CONFIDENCE  = 0.65
 ```
 
-### Saved Model Naming
-
-| File | Description |
-|------|-------------|
-| `artifacts/model_v1.h5` | Baseline MLP, no augmentation |
-| `artifacts/model_v2.h5` | Augmented MLP + emotion concat (primary demo model) |
-| `artifacts/model_v3.h5` | Augmented LSTM + emotion concat |
-
-Keep all variants — they are the ablation table.
+Changing `FACE_IDX` order silently shuffles the model's input and breaks predictions without any error message. This was a previously fixed bug — do not reintroduce it.
 
 ---
 
-## Data Augmentation (Phase 1A — required before Phase 2)
+## Deployment Architecture (Phase 5 — What to Build)
 
-Apply to training set only. **Never augment validation or test sets.**
-
-```python
-# 1. Horizontal flip — valid for most ESL signs
-lm_flip = lm.copy()
-lm_flip[:, 0] = 1 - lm_flip[:, 0]
-
-# 2. Temporal speed jitter (80% and 120% speed)
-from scipy.interpolate import interp1d
-def resample_sequence(seq, factor):
-    N = len(seq)
-    old_t = np.linspace(0, 1, N)
-    new_N = int(N * factor)
-    new_t = np.linspace(0, 1, new_N)
-    f = interp1d(old_t, seq, axis=0)
-    return f(new_t)
-
-# 3. Gaussian noise — simulates hand tremor
-lm_noisy = lm + np.random.normal(0, 0.005, lm.shape)
-
-# 4. Landmark dropout — simulates occlusion (hand joints only, not wrist)
-mask = np.random.rand(*lm.shape[:1]) < 0.1
-lm_drop = lm.copy()
-lm_drop[mask, 1:] = 0
+### Current state (broken for mobile)
+```
+Mobile app (teammate's laptop)  →  ???  →  localhost:8000 (your laptop)
+                                                    ↑
+                               internet can't see this
 ```
 
-Target: ~2,200+ training sequences from original ~440 (5× multiplier).
+### Target state (MVP)
+```
+Mobile app (anywhere)  →  wss://esl-app.up.railway.app/ws
+                                        ↓
+                          Railway container (your code)
+                                        ↓
+                          downloads model_v2.keras from HuggingFace Hub
+                                        ↓
+                          predict_frame() → JSON response
+```
+
+### Why this architecture
+
+| Choice | Why |
+|--------|-----|
+| Railway (not Heroku) | Free tier, Docker support, auto-redeploy from GitHub push |
+| HuggingFace Hub (not Git LFS) | model_v2.keras is ~200KB–2MB. GitHub has 100MB file limit. HuggingFace is designed for ML model storage, free, permanent. |
+| WebSocket (not REST) | Mobile app sends 10 frames/sec. REST would add connection overhead per frame. WebSocket is one persistent connection — <150ms round-trip. |
+| Docker (not buildpack) | MediaPipe needs system libraries (libGL, libglib). Buildpacks don't handle this reliably. Dockerfile gives full control. |
 
 ---
 
-## Activation Gate (Phase 2 — non-negotiable)
+## Files to Create for Deployment
 
-Without this, the model predicts a class every frame even when the signer is resting. The demo shows a constant stream of wrong predictions. This single feature is worth two weeks of accuracy tuning in terms of demo quality.
+### 1. `scripts/download_model.py`
+
+Downloads model from HuggingFace at container startup. Uses `HF_TOKEN` env var (set in Railway dashboard).
 
 ```python
-VELOCITY_THRESHOLD = 0.02  # tune empirically
+"""
+scripts/download_model.py
+Downloads model artifacts from HuggingFace Hub.
+Called by Dockerfile RUN step and can be re-run locally.
 
-lm_prev = None
+Usage:
+    python scripts/download_model.py
+    HF_TOKEN=xxx python scripts/download_model.py
+"""
+import os
+import sys
+from pathlib import Path
 
-def activation_gate(lm_current):
-    global lm_prev
-    if lm_prev is None:
-        lm_prev = lm_current
-        return False
-    velocity = np.linalg.norm(lm_current - lm_prev)
-    lm_prev = lm_current
-    return velocity >= VELOCITY_THRESHOLD
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+HF_REPO_ID = os.environ.get("HF_REPO_ID", "YOUR_USERNAME/esl-model")
+HF_TOKEN   = os.environ.get("HF_TOKEN")
+
+FILES_NEEDED = [
+    ("model_v2.keras",  "artifacts/model_v2.keras"),
+    ("label2idx.json",  "artifacts/label2idx.json"),
+]
+
+def download():
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        print("[download] huggingface_hub not installed. Run: pip install huggingface_hub")
+        sys.exit(1)
+
+    os.makedirs("artifacts", exist_ok=True)
+    for hf_filename, local_path in FILES_NEEDED:
+        if os.path.exists(local_path):
+            print(f"[download] Already exists: {local_path}")
+            continue
+        print(f"[download] Downloading {hf_filename} from {HF_REPO_ID}...")
+        hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename=hf_filename,
+            local_dir="artifacts",
+            token=HF_TOKEN,
+        )
+        print(f"[download] Saved to {local_path}")
+    print("[download] All artifacts ready.")
+
+if __name__ == "__main__":
+    download()
 ```
 
-UI states (must implement all four):
-- No hand detected → `"No hand detected — move closer"`
-- Hand still (below threshold) → `"Ready — show a sign"`
-- Hand moving (above threshold) → run classifier → `"Detecting..."`
-- Confident prediction committed → `"Sign: HELLO (0.89)"`
+### 2. `Dockerfile`
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System libraries required by OpenCV and MediaPipe
+RUN apt-get update && apt-get install -y \
+    libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgl1-mesa-glx libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies first (Docker layer cache)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt huggingface_hub
+
+# Copy source code
+COPY src/ src/
+COPY web/ web/
+COPY scripts/ scripts/
+
+# Download model at build time (cached in image layer)
+# HF_TOKEN must be set as a build arg or env var
+ARG HF_TOKEN
+ARG HF_REPO_ID=YOUR_USERNAME/esl-model
+ENV HF_TOKEN=$HF_TOKEN
+ENV HF_REPO_ID=$HF_REPO_ID
+RUN python scripts/download_model.py
+
+EXPOSE 8000
+CMD ["uvicorn", "web.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+```
+
+**Important:** `--workers 1` is required. MediaPipe and the Keras model are not safe to share across multiple processes. One worker handles all WebSocket connections asynchronously — this is fine for demo load.
+
+### 3. `.github/workflows/deploy.yml`
+
+```yaml
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'web/**'
+      - 'scripts/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service esl-server --detach
+```
+
+Get `RAILWAY_TOKEN` from Railway dashboard → Account Settings → Tokens. Add it as a GitHub secret.
+
+### 4. `scripts/promote_model.py`
+
+```python
+"""
+scripts/promote_model.py
+Promote a new model version to production.
+
+Usage:
+    python scripts/promote_model.py model_v3.keras
+    # Then: git commit -m "promote model_v3" && git push
+    # Railway auto-redeploys with the new model.
+"""
+import sys
+import os
+
+def promote(version: str):
+    from huggingface_hub import HfApi
+    repo_id = os.environ.get("HF_REPO_ID", "YOUR_USERNAME/esl-model")
+    token   = os.environ.get("HF_TOKEN")
+    if not token:
+        print("ERROR: Set HF_TOKEN environment variable first.")
+        sys.exit(1)
+
+    local_path = f"artifacts/{version}"
+    if not os.path.exists(local_path):
+        print(f"ERROR: {local_path} not found locally.")
+        sys.exit(1)
+
+    api = HfApi()
+    print(f"Uploading {version} to {repo_id}...")
+    api.upload_file(
+        path_or_fileobj=local_path,
+        path_in_repo=version,
+        repo_id=repo_id,
+        repo_type="model",
+        token=token,
+    )
+    print(f"Updating current.txt → {version}")
+    api.upload_file(
+        path_or_fileobj=version.encode(),
+        path_in_repo="current.txt",
+        repo_id=repo_id,
+        repo_type="model",
+        token=token,
+    )
+    print(f"Done. Production model is now: {version}")
+    print("Trigger redeploy: git commit --allow-empty -m 'deploy: promote to {version}' && git push")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python scripts/promote_model.py <model_filename>")
+        print("Example: python scripts/promote_model.py model_v3.keras")
+        sys.exit(1)
+    promote(sys.argv[1])
+```
 
 ---
 
-## Sliding Window Smoothing (Phase 2)
+## Step-by-Step Deployment Checklist
 
-```python
-from collections import deque
+Run these in order. Do not skip steps.
 
-WINDOW_SIZE = 5
-MIN_VOTES = 3
-MIN_CONFIDENCE = 0.65
+### Step 1 — Verify local server works (5 min)
+```bash
+python scripts/smoke_check.py
+# Expected: predict_frame(black): "__no_hands__" conf=0.0 emo=neutral
 
-prediction_window = deque(maxlen=WINDOW_SIZE)
+python -m uvicorn web.server:app --host 0.0.0.0 --port 8000
+curl http://localhost:8000/health
+# Expected: {"status":"ok","model_loaded":true}
+```
+If `model_loaded` is false: check that `artifacts/model_v2.keras` exists. `src/paths.py` looks in `artifacts/` then `output/artifacts/`.
 
-def smooth_prediction(label, confidence):
-    prediction_window.append((label, confidence))
-    if len(prediction_window) < WINDOW_SIZE:
-        return None, 0.0
-    labels = [p[0] for p in prediction_window]
-    confs  = [p[1] for p in prediction_window]
-    top_label = max(set(labels), key=labels.count)
-    if labels.count(top_label) >= MIN_VOTES and np.mean(confs) >= MIN_CONFIDENCE:
-        return top_label, np.mean(confs)
-    return None, 0.0
+### Step 2 — ngrok for immediate mobile testing (10 min)
+```bash
+# Install ngrok: https://ngrok.com/download
+ngrok config add-authtoken YOUR_NGROK_TOKEN
+
+# Terminal 1: start server
+python -m uvicorn web.server:app --host 0.0.0.0 --port 8000
+
+# Terminal 2: expose it
+ngrok http 8000
+# Output: Forwarding https://abc123.ngrok-free.app -> localhost:8000
+```
+Give teammate: `wss://abc123.ngrok-free.app/ws`
+This works for demo/viva. URL changes every restart. Replace with Railway URL after.
+
+### Step 3 — Upload model to HuggingFace Hub (20 min)
+```bash
+pip install huggingface_hub
+
+# 1. Create free account at huggingface.co
+# 2. Create a new model repository named "esl-model" (can be private)
+# 3. Get token from huggingface.co/settings/tokens (write permission)
+
+python -c "
+from huggingface_hub import HfApi
+api = HfApi()
+token = 'YOUR_TOKEN_HERE'
+repo  = 'YOUR_USERNAME/esl-model'
+
+api.upload_file(path_or_fileobj='artifacts/model_v2.keras',  path_in_repo='model_v2.keras',  repo_id=repo, repo_type='model', token=token)
+api.upload_file(path_or_fileobj='artifacts/label2idx.json', path_in_repo='label2idx.json', repo_id=repo, repo_type='model', token=token)
+api.upload_file(path_or_fileobj=b'model_v2.keras',           path_in_repo='current.txt',     repo_id=repo, repo_type='model', token=token)
+print('Upload complete')
+"
+```
+
+Update `HF_REPO_ID` in `scripts/download_model.py` and `scripts/promote_model.py` to your actual repo ID.
+
+### Step 4 — Test the download script locally (5 min)
+```bash
+# Rename your local model temporarily to test
+mv artifacts/model_v2.keras artifacts/model_v2.keras.bak
+HF_TOKEN=your_token python scripts/download_model.py
+# Should download and restore the file
+mv artifacts/model_v2.keras.bak artifacts/model_v2.keras  # restore
+```
+
+### Step 5 — Create Dockerfile and test it locally (20 min)
+```bash
+# Build the Docker image
+docker build --build-arg HF_TOKEN=your_token -t esl-server .
+
+# Run it locally to verify
+docker run -p 8000:8000 esl-server
+
+# Test
+curl http://localhost:8000/health
+# Expected: {"status":"ok","model_loaded":true}
+```
+If Docker is not installed: install from docker.com. This step is required before Railway.
+
+### Step 6 — Deploy to Railway (30 min)
+```bash
+# 1. Go to railway.app → sign up (free) → New Project → Deploy from GitHub
+# 2. Select your repository
+# 3. Railway detects the Dockerfile automatically
+# 4. Go to your service → Variables tab → add:
+#      HF_TOKEN = your_huggingface_token
+#      HF_REPO_ID = your_username/esl-model
+# 5. Go to Settings → Networking → Generate Domain
+#    You get: https://esl-xxxxx.up.railway.app
+
+# Install Railway CLI for later use
+npm install -g @railway/cli
+railway login
+```
+
+### Step 7 — Update mobile app with permanent URL (5 min)
+Tell teammate the permanent WebSocket URL: `wss://esl-xxxxx.up.railway.app/ws`
+This never changes. The mobile app is configured once.
+
+### Step 8 — Add GitHub Actions for auto-redeploy (15 min)
+```bash
+# Get Railway token: railway.app → Account Settings → Tokens → Create token
+# Add to GitHub: your-repo → Settings → Secrets → Actions → New secret
+#   Name: RAILWAY_TOKEN
+#   Value: your_railway_token
+
+# Create the workflow file:
+mkdir -p .github/workflows
+# (write .github/workflows/deploy.yml — content in section above)
+
+git add .github/workflows/deploy.yml
+git commit -m "feat: add Railway auto-deploy on push to main"
+git push
+```
+
+After this: every push to `main` that touches `src/`, `web/`, or `Dockerfile` triggers a Railway redeploy automatically.
+
+---
+
+## CI/CD — Accuracy Improvement Loop (Post-Launch)
+
+This is the loop you run every time you want to ship better predictions:
+
+```
+1. Collect new data (more signers, more signs, or emotion-labeled data)
+       ↓
+2. Run Phase 1 Colab notebook → produces model_v3.keras (or v4, v5...)
+       ↓
+3. Run evaluation: python scripts/export_eval_arrays.py && python -m src.evaluate
+   Confirm new model beats old: check results/ablation_table.csv
+       ↓
+4. Promote new model:
+   python scripts/promote_model.py model_v3.keras
+       ↓
+5. Trigger redeploy (empty commit is enough):
+   git commit --allow-empty -m "deploy: promote model_v3" && git push
+       ↓
+6. Railway rebuilds container, downloads model_v3.keras from HuggingFace
+   Mobile app users get better predictions — zero manual steps, zero downtime
+```
+
+### Accuracy improvement roadmap (in order of impact)
+
+| Priority | Action | Expected gain | Effort |
+|----------|--------|---------------|--------|
+| 1 | Add 4+ new signers to training data | +15–25% on unseen people | 2 hrs recording + 3 hrs retraining |
+| 2 | Expand from 8–12 to 25–30 MVP signs | Broader vocabulary | 4 hrs recording + 4 hrs retraining |
+| 3 | Use LSTM (model_v3) for dynamic signs | +5–10% on motion-dependent signs | Already trained, just evaluate and promote |
+| 4 | Collect emotion-labeled data | Unlocks emotion feature | Large effort — Phase 2 of future work |
+| 5 | Scale to all 55 classes | Full vocabulary | 50+ videos/class needed |
+
+---
+
+## File Structure (Current, Complete)
+
+```
+project/
+├── .github/
+│   └── workflows/
+│       └── deploy.yml              ← CREATE THIS (Step 8)
+├── artifacts/
+│   ├── model_v1.keras              ✅ exists — baseline MLP
+│   ├── model_v2.keras              ✅ exists — primary model (augmented MLP + emotion)
+│   ├── model_v3.keras              ✅ exists — LSTM variant
+│   ├── model_v2.tflite             (create if FPS < 10: python scripts/export_tflite.py)
+│   └── label2idx.json              ✅ exists — class name mapping
+├── data/
+│   ├── landmarks/                  raw .npy per-video landmark files
+│   └── augmented_landmarks/        augmented sequences
+├── results/
+│   ├── confusion_matrix.png        (run: python -m src.evaluate)
+│   ├── ablation_table.csv          (run: python -m src.evaluate)
+│   ├── classification_report.txt   (run: python -m src.evaluate)
+│   └── failure_analysis.png        (run: python -m src.evaluate)
+├── scripts/
+│   ├── download_model.py           ← CREATE THIS (Step 3)
+│   ├── promote_model.py            ← CREATE THIS (for post-launch)
+│   ├── export_eval_arrays.py       ✅ exists
+│   ├── export_tflite.py            ✅ exists
+│   └── smoke_check.py              ✅ exists
+├── src/
+│   ├── inference.py                ✅ exists — predict_frame() — DO NOT MODIFY
+│   ├── augmentation.py             ✅ exists
+│   ├── evaluate.py                 ✅ exists
+│   ├── landmark_gate.py            ✅ exists
+│   └── paths.py                    ✅ exists
+├── web/
+│   ├── server.py                   ✅ exists — FastAPI WebSocket server
+│   ├── index.html                  ✅ exists — PWA browser frontend
+│   └── manifest.json               ✅ exists
+├── demo.py                         ✅ exists — full desktop app
+├── Dockerfile                      ← CREATE THIS (Step 5)
+├── requirements.txt                ✅ exists
+├── run_demo.sh / run_demo.ps1      ✅ exists
+├── run_web.sh  / run_web.ps1       ✅ exists
+└── pyproject.toml                  ✅ exists
 ```
 
 ---
 
-## Emotion Confidence Modifier
+## What NOT to Do — Rules for Claude Code
 
+1. **Do not modify `src/inference.py`** unless fixing a verified bug. It is the core contract. Every other file depends on it.
+2. **Do not change `FACE_IDX` order** — reordering silently breaks the model's input distribution. This was already fixed once.
+3. **Do not add DeepFace to the web server** — pass `"neutral"` always in web/mobile mode. DeepFace requires 500MB download and crashes on frames without faces.
+4. **Do not use `--workers 2+` in uvicorn** — MediaPipe and Keras model are not multi-process safe.
+5. **Do not commit `artifacts/*.keras` or `artifacts/*.npy` to git** — the `.gitignore` already blocks this. Model files go to HuggingFace Hub only.
+6. **Do not retrain the model from Claude Code** — retraining happens in Google Colab (Phase 1 notebook). Claude Code only handles serving/deployment.
+7. **Do not change the WebSocket message format** without notifying the mobile app team. Current format is: `{"label": str, "confidence": float, "emotion": str, "latency_ms": float}`.
+
+---
+
+## Models — Reference
+
+| File | Type | Input dim | Use for |
+|------|------|-----------|---------|
+| `model_v1.keras` | Baseline MLP, no augmentation | 163 | Ablation comparison only |
+| `model_v2.keras` | Augmented MLP + emotion | 163 | **Production. Use this.** |
+| `model_v3.keras` | Augmented LSTM + emotion | (30, 163) | Evaluate for dynamic signs — may outperform v2 |
+| `model_v2.tflite` | TFLite export of v2 | 163 | Use if FPS < 10 on exam laptop |
+
+### Normalisation (must match training exactly)
 ```python
-EMOTION_CONFLICTS = {
-    ('happy', 'angry'): 0.75,
-    ('happy', 'disgust'): 0.75,
-    ('sad', 'happy'): 0.75,
-}
-
-def apply_emotion_modifier(label, confidence, emotion):
-    key = (label.lower(), emotion.lower())
-    modifier = EMOTION_CONFLICTS.get(key, 1.0)
-    return confidence * modifier
+def _normalize(ff: np.ndarray) -> np.ndarray:
+    raw   = ff.astype(np.float64)
+    left  = raw[0:63].reshape(21, 3).copy()
+    right = raw[63:126].reshape(21, 3).copy()
+    face  = raw[126:].reshape(-1, 3).copy()
+    # Hands: origin = wrist (joint 0), scale = max radial distance from wrist
+    for seg in [left, right]:
+        if seg.any():
+            seg -= seg[0]
+            s = np.max(np.linalg.norm(seg, axis=1))
+            if s > 0: seg /= s
+    # Face: origin = centroid, scale = max radial distance from centroid
+    if face.any():
+        face -= face.mean(axis=0)
+        s = np.max(np.linalg.norm(face, axis=1))
+        if s > 0: face /= s
+    return np.concatenate([left.flatten(), right.flatten(), face.flatten()]).astype(np.float32)
 ```
 
 ---
 
 ## Performance Targets
 
-| Metric | Target |
-|--------|--------|
-| Display FPS | ≥ 15 FPS |
-| Inference resolution | 320×240 (resize before MediaPipe) |
-| DeepFace frequency | Every K=5 frames |
-| Confidence threshold | ≥ 0.65 to display prediction |
-| Model size (MLP) | ~50 KB |
-| Web round-trip latency | < 150ms on localhost |
-
-If FPS < 10: export to TFLite — this is **mandatory**, not optional.
-
-```python
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-tflite_model = converter.convert()
-with open('artifacts/model_v2.tflite', 'wb') as f:
-    f.write(tflite_model)
-```
+| Metric | Target | How to check |
+|--------|--------|-------------|
+| Desktop FPS | ≥ 15 | FPS counter in OpenCV window |
+| Inference latency | ≤ 100ms | `python -m src.evaluate` timing section |
+| Web round-trip | ≤ 150ms | `latency_ms` field in WebSocket JSON response |
+| Railway cold start | ≤ 30s | First request after deploy |
+| Model size (v2) | ~200KB | `ls -lh artifacts/model_v2.keras` |
 
 ---
 
-## Evaluation (Phase 3)
+## Team Assignments (Current State)
 
-```python
-from sklearn.metrics import classification_report, confusion_matrix
-import seaborn as sns
-
-# Per-class metrics
-print(classification_report(y_true, y_pred, target_names=class_names))
-
-# Confusion matrix
-cm = confusion_matrix(y_true, y_pred)
-sns.heatmap(cm, annot=True, xticklabels=class_names, yticklabels=class_names)
-plt.savefig('results/confusion_matrix.png')
-```
-
-Ablation table required columns: model name, accuracy, macro F1, inference latency (ms mean ± std).
-
-For the top 3 confused pairs: visualise their landmark sequences side by side and explain **why** they are visually similar. This is the strongest part of your results in the viva.
+| Person | Owns | Status |
+|--------|------|--------|
+| Abdullah (Team Lead) | Deployment pipeline, `Dockerfile`, `download_model.py`, Railway setup, `deploy.yml`, viva slides | 🔴 TODO |
+| AI Member 1 | `src/inference.py`, model variants, TFLite export, latency benchmark | ✅ Done |
+| AI Member 2 | `src/evaluate.py`, confusion matrix, ablation table, failure analysis | Run `python -m src.evaluate` |
+| Software Member 1 | `web/index.html`, demo videos | ✅ Done |
+| Software Member 2 | `web/server.py`, `README.md`, `run_web.sh`, repo packaging | ✅ Done |
 
 ---
 
-## Phase 4 — Web App Architecture Detail
+## Viva — Key Questions and Exact Answers
 
-### FastAPI WebSocket Server (web/server.py)
+**"Why landmark-based instead of CNN on raw images?"**
+> With 10 videos per sign class, a CNN would overfit severely — it needs thousands of images. MediaPipe gives us 156 clean numbers per frame representing every hand joint position, stripped of background and lighting. Our MLP is 200KB, trains in minutes, and runs at 50+ FPS on CPU. A CNN would be 14MB, need GPU, and still perform worse at this dataset size.
 
-```python
-import base64, cv2, numpy as np, json
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from src.inference import predict_frame
+**"Why LSTM over MLP?"**
+> We categorised all MVP signs as static or dynamic. Static signs — where only hand shape matters — use MLP and predict from a single frame. Dynamic signs — where motion encodes meaning — use LSTM, which reads a sequence of 30 frames. The ablation table shows LSTM outperforms MLP on dynamic signs specifically.
 
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=['*'])
+**"What is the data leakage bug you fixed?"**
+> Frame-level train/val splitting lets multiple frames from the same video appear in both sets. Since those frames share the signer's hand proportions, the model memorises the person not the sign — artificially inflated accuracy. We fixed this by splitting at video level: 80% of videos per class go to train, 20% to val. No video ever appears in both sets.
 
-@app.websocket('/ws')
-async def ws(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            data = await websocket.receive_text()
-            frame = cv2.imdecode(
-                np.frombuffer(base64.b64decode(data), np.uint8),
-                cv2.IMREAD_COLOR
-            )
-            label, conf, emotion = predict_frame(frame)
-            await websocket.send_text(
-                json.dumps({"label": label, "confidence": conf, "emotion": emotion})
-            )
-    except WebSocketDisconnect:
-        pass  # client disconnected — do not crash
-```
+**"Why is emotion accuracy limited?"**
+> We trained with neutral emotion as a placeholder because our signing dataset has no emotion ground-truth labels. The architecture supports live emotion — the 7-dim slot is in the input — but the model hasn't learned to use variation there. Fix: collect emotion-labeled data, retrain model_v4. Zero architecture changes needed.
 
-**Add `/health` GET endpoint** returning `{ "status": "ok" }` — used to verify server is running before demo.
+**"Why not a native mobile app?"**
+> We have a PWA — the web app is installable on Android and iOS home screen via the same codebase. No app store, no native SDK, no cross-compilation. The same `predict_frame()` function powers the desktop app, the browser frontend, and the mobile interface. Adding a native app is future work requiring TFLite + MediaPipe iOS/Android SDKs.
 
-### Frontend Frame Capture Loop (web/index.html)
-
-```javascript
-// Every 100ms: capture → encode → send → receive → overlay
-setInterval(() => {
-    ctx.drawImage(video, 0, 0, 320, 240);
-    const base64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
-    ws.send(base64);
-}, 100);
-
-ws.onmessage = (event) => {
-    const { label, confidence, emotion } = JSON.parse(event.data);
-    // update overlay canvas
-};
-```
-
-**Auto-reconnect on disconnect:**
-```javascript
-function connect() {
-    ws = new WebSocket('ws://localhost:8000/ws');
-    ws.onclose = () => setTimeout(connect, 2000);  // exponential backoff
-}
-```
-
-### Stub WebSocket Server for Frontend Dev (parallel work)
-
-Software Member 1 can start frontend on day one of Phase 4 using this stub — no real model needed:
-
-```python
-from fastapi import FastAPI, WebSocket
-import asyncio, json
-
-app = FastAPI()
-
-@app.websocket('/ws')
-async def ws(websocket):
-    await websocket.accept()
-    while True:
-        await websocket.receive_text()
-        await websocket.send_text(
-            json.dumps({"label": "HELLO", "confidence": 0.91, "emotion": "happy", "fps": 18})
-        )
-```
-
-### ngrok for Mobile HTTPS
-
-`getUserMedia()` requires HTTPS on all browsers. `localhost` is the only exception. For phone testing:
-
-```bash
-ngrok http 8000
-# copy: https://xxxxx.ngrok-free.app
-# update WebSocket URL in frontend to: wss://xxxxx.ngrok-free.app/ws
-```
+**"What are your limitations?"**
+> Single signer in training data — accuracy drops on unseen signers. MVP vocabulary is 8–12 of 55 total signs. Emotion trained on neutral placeholder only. No sentence-level recognition — only isolated signs. The confusion matrix shows the top 3 misclassified pairs.
 
 ---
 
-## File Structure
+## Git Workflow
 
 ```
-project/
-├── artifacts/
-│   ├── model_v1.h5           # baseline MLP
-│   ├── model_v2.h5           # augmented + emotion (primary)
-│   ├── model_v2.tflite       # TFLite export (if FPS < 10)
-│   └── model_v3.h5           # LSTM variant
-├── data/
-│   ├── landmarks/            # .npy files, shape (num_frames, feature_dim)
-│   └── augmented/            # augmented sequences
-├── results/
-│   └── confusion_matrix.png
-├── src/
-│   ├── inference.py          # predict_frame() — owned by AI Member 1
-│   ├── mediapipe_utils.py
-│   ├── augmentation.py       # owned by AI Member 1
-│   └── evaluate.py           # owned by AI Member 2
-├── web/
-│   ├── server.py             # FastAPI WebSocket server — owned by Software Member 2
-│   ├── index.html            # PWA frontend — owned by Software Member 1
-│   ├── manifest.json         # PWA manifest
-│   └── sw.js                 # service worker
-├── demo.py                   # desktop app entry point
-├── run_demo.sh               # activate venv + python demo.py
-├── run_web.sh                # activate venv + uvicorn web.server:app
-└── requirements.txt          # includes fastapi, uvicorn[standard]
+main              ← always deployable. Railway watches this branch.
+feat/deployment   ← Dockerfile + download_model.py + deploy.yml
+feat/evaluation   ← evaluation artifacts and ablation numbers
+feat/accuracy-v3  ← promote model_v3 after testing
 ```
 
----
+Never commit directly to `main`. PR → review → merge. Railway redeploys automatically on merge.
 
-## Team Roles — Complete Assignment Table
-
-### Team Lead (Abdullah)
-
-| Phase | Task | What You Own | Definition of Done |
-|-------|------|-------------|-------------------|
-| 1 | 1B review | Review & merge AI Member 1 PR, run final model comparison | All 4 model variants in `artifacts/`, ablation numbers recorded |
-| 2 | 2.1 Threading scaffold | Write Thread 1–3 + main, code review all PRs | App runs at 15+ FPS, no crashes for 5 minutes |
-| 2 | 2.2 Activation gate | Implement and tune velocity threshold | No predictions shown when hands are still |
-| 2 | 2.3 Emotion fusion | Implement live emotion → one-hot → concat pipeline | Emotion updates every 5 frames, correct encoding confirmed |
-| 2 | 2.6 Performance tuning | Profile bottleneck, TFLite if needed, benchmark 100 frames | Mean inference latency documented in README |
-| 3 | 3.4 Viva slide deck (9 slides) | Own all slides; gather results content from AI Member 2 | Reviewed by all 5 members before viva |
-| 4 | 4.5 Integration test | End-to-end test of web app, 10 signs, round-trip latency | < 150ms, auto-reconnect working, mobile test passing |
-| 4 | 4.8 Viva slide update | Add web/mobile slide, update future work slide | 10-slide deck complete |
-
-### AI Member 1 — Model & Inference Pipeline
-
-| Phase | Task | What You Own | Definition of Done |
-|-------|------|-------------|-------------------|
-| 1 | 1A Augmentation | `src/augmentation.py` with all 4 augmentation types | ~2,200+ training sequences confirmed in logs |
-| 1 | 1B Retrain | `model_v1.h5` through `v3.h5`, training logs saved | All models load, predict correctly on 3 test signs |
-| 2 | `src/inference.py` | `predict_frame()`, normalisation, feature concat | Stub returns correct types; real version matches output format |
-| 2 | TFLite export (if FPS < 10) | `artifacts/model_v2.tflite` | TFLite matches Keras accuracy within 1% |
-| 3 | Latency benchmarking | 100-frame timing test, mean ± std in ms | Numbers in README and ablation table slide |
-
-### AI Member 2 — Evaluation & Results
-
-| Phase | Task | What You Own | Definition of Done |
-|-------|------|-------------|-------------------|
-| 1 | 1C Static/dynamic labeling | Table in README: each MVP sign labeled Static or Dynamic | All 8–12 signs categorised, rationale documented |
-| 2 | Ablation study (`src/evaluate.py`) | Run all model variants on held-out test set | Accuracy + macro F1 + latency for v1, v2, v3 in CSV |
-| 2 | Confusion matrix | `results/confusion_matrix.png` (seaborn heatmap) | File saved, top 3 confused pairs identified |
-| 2 | Failure analysis | Landmark visualisations of top 3 confused pairs side by side | Visual explanation of each confusion, ready for viva |
-| 3 | Results slide content | Ablation table values + confusion matrix image delivered to Team Lead | Delivered 2 days before viva |
-
-### Software Member 1 — UI / Display / Frontend
-
-| Phase | Task | What You Own | Definition of Done |
-|-------|------|-------------|-------------------|
-| 2 | 2.5 OpenCV overlays | Status bar, L/D/Q key toggles, FPS counter | All 4 UI states shown; FPS displayed |
-| 3 | 3.3 Desktop demo video (60–90s) | `demo_desktop.mp4` | 5 signs recognised, emotion visible, one deliberate failure |
-| 4 | 4.2 HTML/JS frontend | `web/index.html` — camera, canvas overlay, status, FPS, mobile layout | Works on desktop Chrome; mobile layout tested in DevTools |
-| 4 | 4.7 Web + mobile demo videos | `demo_web.mp4`, `demo_mobile.mp4` | Both clips < 45s, predictions visible, mobile clip shows phone |
-
-### Software Member 2 — Packaging, Server, Reproducibility
-
-| Phase | Task | What You Own | Definition of Done |
-|-------|------|-------------|-------------------|
-| 2 | 2.5 Video fallback | `--source` arg in `demo.py`, `run_demo.sh` | `python demo.py --source test.mp4` runs without errors |
-| 3 | 3.5 Final packaging | Repo tag `v1-final`, deliverables zip, clean env test | Fresh venv install + demo in under 10 steps |
-| 3 | `README.md` | Full README: install, run desktop, run web, known issues | Another team member can set up from scratch using only README |
-| 4 | 4.1 FastAPI server | `web/server.py`, WebSocket, CORS, health check, disconnect handling | `/health` returns 200; 5 signs predicted end-to-end |
-| 4 | 4.3 PWA manifest + service worker | `web/manifest.json`, `web/sw.js`, app icon | "Add to Home Screen" prompt appears on Android Chrome via ngrok |
-| 4 | 4.4 Mobile test via ngrok | ngrok setup, mobile test, README ngrok section | 2 signs predicted correctly on physical phone |
-| 4 | 4.6 `run_web.sh` + requirements update | `run_web.sh`, `fastapi`/`uvicorn[standard]` in requirements | Server starts in under 5 seconds on clean install |
+Small commit messages: "Add Dockerfile for Railway deployment" not "update stuff".
 
 ---
 
-## Hour Estimate (Revised)
+## Environment Variables (Required for Deployment)
 
-| Phase | Original | Revised | Status |
-|-------|---------|---------|--------|
-| Phase 1 — Data & Model | ~22 hrs | ~22 hrs | Mostly done |
-| Phase 2 — Real-Time Integration | ~24 hrs | ~28 hrs | Not started |
-| Phase 3 — Polish, Test & Deliver | ~12 hrs | ~14 hrs | Not started |
-| Phase 4 — Web App (NEW) | — | ~15 hrs | Not started |
-| Buffer | — | ~8 hrs | Non-negotiable |
-| **TOTAL** | **~54 hrs** | **~87 hrs** | ~17.4 hrs/person |
+| Variable | Where set | Value |
+|----------|-----------|-------|
+| `HF_TOKEN` | Railway dashboard → Variables | HuggingFace write token |
+| `HF_REPO_ID` | Railway dashboard → Variables | `your_username/esl-model` |
+| `RAILWAY_TOKEN` | GitHub Secrets | Railway API token for CI |
 
-**Where the original estimate is optimistic:**
-- Task 2.1 (threading): 3 hrs estimated → likely 4–5 hrs for first-timers. Race conditions are subtle.
-- Task 3.2 (stability): 2 hrs estimated → add 2–3 hrs if memory leaks appear.
-- Task 3.4 (viva slides): 2 hrs estimated → underestimated if results are not compiled first.
+Never put tokens in code or commit them to git.
 
 ---
 
-## Viva Slide Structure (10 slides after Phase 4)
+## Known Issues
 
-| # | Slide | Owner |
-|---|-------|-------|
-| 1 | Problem statement + motivation (1.5M deaf/HoH in Egypt) | Team Lead |
-| 2 | Dataset — 55 classes, 10 videos/class, MVP vocabulary rationale | AI Member 2 |
-| 3 | System architecture diagram | Team Lead |
-| 4 | Model design — MLP vs LSTM, static/dynamic sign split | AI Member 1 |
-| 5 | Ablation table — baseline vs augmented vs emotion-fused | AI Member 2 |
-| 6 | Confusion matrix + failure analysis (top 2–3 confused pairs) | AI Member 2 |
-| 7 | Real-time system — threading, FPS, latency numbers | Team Lead |
-| 8 | Live demo or demo video links (desktop + web + mobile) | Software Member 1 |
-| 9 | Web & mobile interface — FastAPI + browser + PWA architecture | Team Lead |
-| 10 | Limitations + future work | Team Lead |
+- `mediapipe==0.10.20` is pinned — newer versions removed `mp.solutions.holistic`. Do not upgrade.
+- DeepFace downloads ~500MB of model weights on first run — this is why we skip it in web/mobile mode.
+- Python 3.12+ is not supported by TensorFlow on Windows — use 3.10 or 3.11 only.
+- `--workers 1` is required for uvicorn — MediaPipe Holistic is not safe to share between processes.
+- On Railway free tier: container sleeps after inactivity. First request after sleep takes ~10–15s (cold start). Add a `/health` ping from the mobile app on launch to wake it up.
 
-**Key viva answers to prepare:**
-- "Why LSTM over MLP?" → Because [X, Y] signs are dynamic — motion encodes meaning. Static signs use MLP. We categorised all 12 MVP signs.
-- "Why landmark-based over raw CNN?" → Small dataset (10 videos/class), CPU-only demo, background invariance, 5-minute training vs hours.
-- "What are your limitations?" → Emotion placeholder at training time. Single signer in training videos. MVP vocabulary only (8–12 of 55 classes). Point to the confusion matrix.
-- "Why not a mobile app?" → We have a PWA — installable on Android/iOS home screen via the same codebase, no app store required.
-
----
-
-## Key Decisions Already Made
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Desktop UI | OpenCV window | `st.camera_input` is snapshot-only, not real-time |
-| Web UI | Plain HTML + Vanilla JS | No build toolchain; runs on any browser; deployable in < 1 day |
-| Primary model | LSTM for dynamic signs, MLP for static signs | Sign type determines temporal requirement |
-| Emotion integration | 7-dim one-hot concat to feature vector | Integrates with model input, not just display |
-| Landmark source | MediaPipe Holistic for both training and inference | Must match — this is the golden rule |
-| Web backend | FastAPI + WebSockets | Async, lightweight, reuses `predict_frame()` unchanged |
-| Mobile delivery | PWA over ngrok (demo), or HTTPS server (production) | No native SDK needed; one codebase |
-| Git workflow | Feature branches → PRs → Team Lead merges to `main` | `main` is always demo-ready |
-
----
-
-## Pre-Viva Checklist (Team Lead Owns — Run 48 Hours Before)
-
-| ☐ | Check | Owner |
-|---|-------|-------|
-| ☐ | Desktop app runs on a **clean machine** from `run_demo.sh` alone | Software Member 2 |
-| ☐ | Web app runs from `run_web.sh`, predictions shown in browser | Software Member 2 |
-| ☐ | Mobile demo works on a physical phone via ngrok | Software Member 2 |
-| ☐ | `model_v2.h5` (not v1) loads without errors | AI Member 1 |
-| ☐ | Activation gate is ON — no predictions when hands are still | Team Lead |
-| ☐ | Confidence threshold is ON — "Detecting..." shown below 0.65 | Team Lead |
-| ☐ | DeepFace errors are caught — falls back to "neutral", doesn't crash | Team Lead |
-| ☐ | Confusion matrix PNG saved in `results/` | AI Member 2 |
-| ☐ | Ablation table values filled in viva slides | Team Lead |
-| ☐ | Failure analysis slide has landmark visualisations | AI Member 2 |
-| ☐ | All 3 demo videos recorded: `demo_desktop.mp4`, `demo_web.mp4`, `demo_mobile.mp4` | Software Member 1 |
-| ☐ | At least one team member NOT in training videos has tested the system | Team Lead |
-| ☐ | Viva slides reviewed by all 5 members | Team Lead |
-| ☐ | Repo tagged `v1-final`, deliverables zip created | Software Member 2 |
-| ☐ | `requirements.txt` includes `fastapi` and `uvicorn[standard]` | Software Member 2 |
-| ☐ | Overnight memory stability test completed (10+ minutes, memory logged) | Team Lead |
-
----
-
-## Git Discipline
-
-- `main` is always demo-ready. Nobody commits directly to `main`. Use feature branches: `feat/augmentation`, `feat/threading`, `feat/ui-overlay`, `feat/web-server`.
-- Small, frequent commits. "Add horizontal flip augmentation" is a good message. "Fix stuff" is not.
-- Team Lead owns final integration. Others make PRs. Team Lead reviews and merges.
-
----
-
-## Future Work (Know for Viva — Do Not Implement)
-
-- **Sentence-level recognition:** current system recognises isolated signs. Real communication needs temporal segmentation to find sign boundaries in continuous signing, plus a language model to fill gaps.
-- **Full 55-class vocabulary:** MVP uses 8–12 signs. Scaling to all 55 requires 50+ videos per class and possibly a hierarchical classifier.
-- **Continuous on-device learning:** fine-tune on-device as new signers use it, adapting to individual hand proportions.
-- **Native mobile app:** TFLite + MediaPipe Android/iOS SDK. Reaches far more users than the PWA but requires native development — out of scope for this project timeline.

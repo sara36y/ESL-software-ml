@@ -1,19 +1,18 @@
 # ESL Real-Time Sign Language Recognition
 # Install: pip install -r requirements.txt
 #
-# Supported: Python 3.10 or 3.11 (see pyproject.toml requires-python).
-# Python 3.13 is not supported by the TensorFlow version range below on Windows.
-# Windows: run .\setup_venv.ps1 once after installing Python 3.11.
+# Supported: Python 3.10–3.13 (see pyproject.toml requires-python).
+# Windows: run .\setup_venv.ps1 once after installing Python 3.11+.
 # GPU is NOT required - all inference runs on CPU.
 
 # -- Core ML -----------------------------------------------------------
-tensorflow>=2.16,<2.18      # Keras 3 bundled; models saved as .keras format
-numpy>=1.24,<2.0
+tensorflow>=2.20            # Keras 3 bundled; Python 3.13 compat
+numpy>=1.26
 scipy>=1.11
 
 # -- Computer Vision ---------------------------------------------------
-opencv-python>=4.8,<4.12
-mediapipe==0.10.20          # PINNED - mp.solutions.holistic removed in later versions
+opencv-python>=4.8
+mediapipe>=0.10.30         # tasks API (HolisticLandmarker); solutions removed in 0.10.30+
 
 # -- Emotion Detection -------------------------------------------------
 deepface>=0.0.89,<0.1       # wraps VGG-Face, FaceNet etc.; install triggers model downloads
