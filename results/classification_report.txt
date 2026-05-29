@@ -1,0 +1,62 @@
+               precision    recall  f1-score   support
+
+     3amel eh       1.00      1.00      1.00         2
+         3ieb       0.67      1.00      0.80         2
+       3rabia       1.00      1.00      1.00         2
+         3waz       1.00      1.00      1.00         2
+       akhoia       1.00      1.00      1.00         2
+         alam       1.00      1.00      1.00         2
+         bhab       1.00      1.00      1.00         2
+         bkrh       1.00      1.00      1.00         2
+       bsor3a       1.00      1.00      1.00         3
+      delwaty       1.00      0.67      0.80         3
+      docktor       1.00      1.00      1.00         2
+       efrdha       1.00      1.00      1.00         2
+  ehtrem nfsk       1.00      1.00      1.00         2
+      elnhrda       0.50      1.00      0.67         1
+ermy wra dhrk       1.00      1.00      1.00         2
+        fatan       1.00      1.00      1.00         2
+      fe sark       1.00      1.00      1.00         3
+         flos       1.00      1.00      1.00         2
+    fokk many       0.50      1.00      0.67         2
+        gomma       0.67      1.00      0.80         2
+        harmy       1.00      1.00      1.00         2
+      hba hba       1.00      1.00      1.00         2
+     helw awy       1.00      1.00      1.00         3
+      hta hta       0.67      1.00      0.80         2
+         kdab       1.00      1.00      1.00         2
+        khaif       0.67      1.00      0.80         2
+   khaly balk       1.00      1.00      1.00         3
+      khatbty       1.00      1.00      1.00         2
+        kolya       1.00      0.50      0.67         2
+         ktab       1.00      0.50      0.67         2
+       mafish       0.67      0.67      0.67         3
+        makar       1.00      0.50      0.67         2
+       manzel       1.00      1.00      1.00         2
+   mash mashy       1.00      1.00      1.00         2
+        mashy       1.00      1.00      1.00         2
+       meraty       1.00      1.00      1.00         2
+      mohands       1.00      1.00      1.00         2
+     moshwash       1.00      1.00      1.00         2
+     msh 3waz       1.00      0.67      0.80         3
+          oda       1.00      1.00      1.00         2
+sabhl elkheer       1.00      0.50      0.67         2
+     sabhlala       1.00      1.00      1.00         3
+        sadak       1.00      1.00      1.00         2
+        sahby       1.00      1.00      1.00         3
+         sbak       1.00      1.00      1.00         2
+        shar3       1.00      1.00      1.00         2
+        shbak       0.00      0.00      0.00         2
+        t3ban       1.00      1.00      1.00         2
+         tmam       1.00      1.00      1.00         2
+      whashny       0.67      1.00      0.80         2
+    whda whda       0.67      1.00      0.80         2
+       y7takr       1.00      1.00      1.00         2
+        yabky       1.00      1.00      1.00         2
+        yadhk       1.00      0.50      0.67         2
+      yallhwy       1.00      1.00      1.00         3
+        yshtm       1.00      1.00      1.00         2
+
+     accuracy                           0.92       121
+    macro avg       0.92      0.92      0.91       121
+ weighted avg       0.93      0.92      0.91       121

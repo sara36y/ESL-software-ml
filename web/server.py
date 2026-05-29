@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from src.inference import load_model, predict_frame
 
+WEB_DIR = Path(__file__).resolve().parent
 
 app = FastAPI()
 app.add_middleware(

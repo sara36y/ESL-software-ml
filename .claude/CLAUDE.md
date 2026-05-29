@@ -19,11 +19,18 @@
 1. The server is not publicly accessible — the mobile app (on teammate's laptop) cannot connect.
 2. There is no deployment pipeline — improving the model requires manual steps.
 
+**Deployment files have been created:**
+- ✅ `scripts/download_model.py` — HuggingFace Hub model download
+- ✅ `Dockerfile` — Railway deployment container (Python 3.13)
+- ✅ `.github/workflows/deploy.yml` — auto-redeploy on push to main
+- ✅ `scripts/promote_model.py` — model version promotion
+
 **What to build next, in order:**
-1. `scripts/download_model.py` — downloads model from HuggingFace Hub at server startup
-2. `Dockerfile` — packages the server for Railway deployment
-3. `.github/workflows/deploy.yml` — triggers Railway redeploy on every push to `main`
-4. `scripts/promote_model.py` — promotes a new model version to production in one command
+1. Upload model to HuggingFace Hub (Step 3 in deployment checklist)
+2. Test web server locally with uvicorn (Step 1)
+3. ngrok for immediate mobile testing (Step 2)
+4. Build Docker image locally and test (Step 5)
+5. Deploy to Railway (Step 6)
 
 ---
 
@@ -486,11 +493,12 @@ This is the loop you run every time you want to ship better predictions:
 project/
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml              ← CREATE THIS (Step 8)
+│       └── deploy.yml              ✅ created — Railway auto-deploy
 ├── artifacts/
 │   ├── model_v1.keras              ✅ exists — baseline MLP
 │   ├── model_v2.keras              ✅ exists — primary model (augmented MLP + emotion)
 │   ├── model_v3.keras              ✅ exists — LSTM variant
+│   ├── holistic_landmarker.task    ✅ exists — MediaPipe tasks API model
 │   ├── model_v2.tflite             (create if FPS < 10: python scripts/export_tflite.py)
 │   └── label2idx.json              ✅ exists — class name mapping
 ├── data/
@@ -502,8 +510,8 @@ project/
 │   ├── classification_report.txt   (run: python -m src.evaluate)
 │   └── failure_analysis.png        (run: python -m src.evaluate)
 ├── scripts/
-│   ├── download_model.py           ← CREATE THIS (Step 3)
-│   ├── promote_model.py            ← CREATE THIS (for post-launch)
+│   ├── download_model.py           ✅ created — HuggingFace Hub model download
+│   ├── promote_model.py            ✅ created — model version promotion
 │   ├── export_eval_arrays.py       ✅ exists
 │   ├── export_tflite.py            ✅ exists
 │   └── smoke_check.py              ✅ exists
@@ -518,7 +526,7 @@ project/
 │   ├── index.html                  ✅ exists — PWA browser frontend
 │   └── manifest.json               ✅ exists
 ├── demo.py                         ✅ exists — full desktop app
-├── Dockerfile                      ← CREATE THIS (Step 5)
+├── Dockerfile                      ✅ created — Railway deployment
 ├── requirements.txt                ✅ exists
 ├── run_demo.sh / run_demo.ps1      ✅ exists
 ├── run_web.sh  / run_web.ps1       ✅ exists
@@ -646,9 +654,9 @@ Never put tokens in code or commit them to git.
 
 ## Known Issues
 
-- `mediapipe==0.10.20` is pinned — newer versions removed `mp.solutions.holistic`. Do not upgrade.
+- `mediapipe>=0.10.30` uses the tasks API (`mp.tasks.vision.HolisticLandmarker`). The old `mp.solutions.holistic` was removed in 0.10.30+. The `holistic_landmarker.task` model file must be in `artifacts/`.
 - DeepFace downloads ~500MB of model weights on first run — this is why we skip it in web/mobile mode.
-- Python 3.12+ is not supported by TensorFlow on Windows — use 3.10 or 3.11 only.
+- Python 3.13 is supported with `tensorflow>=2.20`. Earlier TensorFlow versions (<2.18) only support Python 3.10–3.11.
 - `--workers 1` is required for uvicorn — MediaPipe Holistic is not safe to share between processes.
 - On Railway free tier: container sleeps after inactivity. First request after sleep takes ~10–15s (cold start). Add a `/health` ping from the mobile app on launch to wake it up.
 

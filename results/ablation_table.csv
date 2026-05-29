@@ -1,0 +1,4 @@
+Model,Val Acc,Macro F1,Latency mean (ms),Latency std (ms)
+v1: Baseline MLP (no aug),0.8182,0.8015,487.47,94.83
+v2: Aug MLP + Emotion,0.9174,0.906,468.96,91.51
+v3: Aug LSTM + Emotion,0.9091,0.8943,461.81,94.46
