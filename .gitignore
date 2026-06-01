@@ -1,6 +1,7 @@
 # working env files 
 .claude/
 .cursor/
+docs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
