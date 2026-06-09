@@ -1,287 +1,615 @@
-# ESL Real-Time Sign Language Recognition
-
-**Graduation Project**
-
-A local Python application that watches a person sign in Egyptian Sign Language and displays the recognised sign in real time — no cloud, no internet, no human interpreter.
+# ESL-software-ml Project Documentation
+## Real-Time Egyptian Sign Language Recognition
 
 ---
 
-## System Overview (to be enhanced)
+## 1. Project Overview and Goals
 
-```
-Webcam → Thread 1 (Capture) → frame_queue
-                             ↓
-                       Thread 2 (Inference)
-                         MediaPipe Holistic
-                         Activation gate
-                         normalize → model.predict()
-                             ↓
-                       result_queue
-                             ↓
-                       Main Thread (Display)
-                         cv2.imshow overlay
+### What is this project?
 
-Thread 3 (Emotion)  ─── DeepFace every 5 frames ──→ _cached_emotion
-                                                          ↑
-                                                   (inference reads)
-```
+**ESL-software-ml** is a graduation project that builds a system to recognize **Egyptian Sign Language (ESL)** from a webcam or video file and display results on screen in real time — **without cloud services** and without a human interpreter.
 
----
+### Problem it addresses
 
-## Prerequisites
+Communication between Deaf/hard-of-hearing users and hearing communities often depends on interpreters or text. This project provides a technical assistant that reads signs from video and outputs:
 
-- Python **3.10 or 3.11 only** for this repo (`pyproject.toml` sets `requires-python = ">=3.10,<3.13"`; TensorFlow wheels on Windows do not support **3.13** today — using 3.13 as your default `python` causes install/import failures).
-- `artifacts/model_v2.keras` (or the same files under `output/artifacts/`) — from Phase 1 notebook
-- `artifacts/label2idx.json` — class index map (see [artifacts/README.md](artifacts/README.md))
-- Webcam (built-in or USB)
+- **Sign label** (e.g. HELLO, THANKS, …)
+- **Confidence score** (0.0–1.0)
+- **Emotion** (in full desktop mode via DeepFace)
 
-### One-time environment (Windows)
+### Project phases
 
-If `python --version` shows 3.12+ or 3.13, install [Python 3.11](https://www.python.org/downloads/) and enable **Add python.exe to PATH**, then:
+| Phase | Content | Status |
+|-------|---------|--------|
+| **Phase 1** | Data collection, landmark extraction, training, models v1/v2/v3 | Complete (Colab notebook) |
+| **Phase 2** | Desktop app `demo.py` + `predict_frame()` API | Complete |
+| **Phase 3** | Evaluation `src/evaluate.py`, ablation table, confusion matrix | Complete |
+| **Phase 4** | Optional web app `web/` (FastAPI + WebSocket) | Optional |
 
-```powershell
-cd path\to\esl_project
-.\setup_venv.ps1
-```
+### Main deliverables
 
-After that, **`run_demo.ps1` / `run_web.ps1` use `.venv`** (or `py -3.11` if you have no venv yet). A **`.python-version`** file (`3.11`) helps pyenv/pyenv-win pick the right interpreter.
+1. **Desktop application** (`demo.py`) — three worker threads + OpenCV display.
+2. **Stable API** (`predict_frame`) — for integration by a software team.
+3. **Keras models** in `artifacts/` — primary runtime model: `model_v2.keras`.
+4. **Scientific evaluation** under `results/`.
 
 ---
 
-## Desktop: two modes
+## 2. System Architecture
+
+### High-level flow (Full mode)
+
+```
+┌─────────────┐     frame_queue      ┌──────────────────┐     result_queue     ┌─────────────────┐
+│  Thread 1   │ ──────────────────► │    Thread 2      │ ──────────────────► │  Main Thread    │
+│  Capture    │   (maxsize=2)       │    Inference     │   (maxsize=2)       │  Display (UI)   │
+│  cv2.read   │                     │  predict_frame() │                     │  cv2.imshow    │
+└─────────────┘                     └────────┬─────────┘                     └────────┬────────┘
+                                             │                                        │
+                                             │ MediaPipe Holistic                   │ latest_frame_ref
+                                             │ Keras MLP (model_v2)                 │
+                                             ▼                                        ▼
+                                    ┌──────────────────┐                     ┌─────────────────┐
+                                    │  _cached_emotion │ ◄── Thread 3 ──────│  Emotion Thread │
+                                    │  (read by T2)    │     DeepFace       │  update_emotion │
+                                    └──────────────────┘     every 5 polls   └─────────────────┘
+```
+
+### System layers
+
+| Layer | Technology | Role |
+|-------|------------|------|
+| **Input** | OpenCV `VideoCapture` | Capture BGR frames from camera or file |
+| **Landmarks** | MediaPipe `HolisticLandmarker` (Tasks API) | 21 joints/hand × 2 + 10 face points = 156 raw values |
+| **Preprocessing** | Normalize + emotion one-hot | 163-dim model input |
+| **Motion gate** | Activation gate (hand velocity) | Block prediction when hands are still |
+| **Classifier** | Keras MLP (`model_v2.keras`) | Softmax → sign class |
+| **Temporal smoothing** | Sliding window (5 frames) | Commit label after ≥3 votes and confidence ≥ 0.65 |
+| **Emotion** | DeepFace (separate thread) | Update `_cached_emotion` asynchronously |
+| **Display** | OpenCV overlay | Status, confidence, emotion, FPS, hand skeleton |
+
+### Data path: frame → decision
+
+1. Full-size BGR frame → resized to **320×240** inside `predict_frame`.
+2. `HolisticLandmarker.detect_for_video()` → 156-dim vector.
+3. No hands detected → `"No hand detected"` or `"__no_hands__"` (raw mode).
+4. Hands still (velocity < 0.02) → `"Ready"`.
+5. Hands moving → normalize → concat emotion → `model.predict` → `"Detecting"` or committed sign after voting.
+
+### Runtime modes
 
 | Mode | Command | Architecture |
 |------|---------|--------------|
-| **Full** (default) | `python demo.py` or `./run_demo.sh` / `.\run_demo.ps1` | Threaded capture + inference + DeepFace cache (`.claude/CLAUDE.md`) |
-| **Sprint** | `python demo.py --sprint` | Single OpenCV loop, `predict_frame(..., "neutral", raw=True)` + app-layer smoothing (`.cursor/instruction.md`) |
+| **Full** | `python demo.py` | 3 threads + DeepFace + smoothing inside `inference.py` |
+| **Sprint** | `python demo.py --sprint` | Single loop, fixed `neutral` emotion, smoothing in `demo.py` |
 
-Sprint mode avoids DeepFace downloads — useful on locked-down exam Wi‑Fi.
+### Web app (`web/`)
 
-Quick model check (no camera):
+One **async WebSocket handler** per connection: browser sends JPEG → server decodes → `predict_frame(frame, cached_emotion="neutral")` — **no DeepFace** and no separate emotion threads.
 
+---
+
+## 3. File Reference
+
+### `src/` package
+
+#### `src/paths.py`
+
+**Purpose:** Resolve artifact paths consistently.
+
+- Checks `artifacts/` then `output/artifacts/` (Colab/Cursor sprint layout).
+- Returns the directory containing `model_v2.keras` or `label2idx.json`.
+- Helpers: `artifacts_dir()`, `model_path()`, `label2idx_path()`, `results_dir()`.
+
+**Why it matters:** Prevents breakage when models are copied to `output/artifacts/`.
+
+---
+
+#### `src/inference.py`
+
+**Purpose:** Core of real-time inference.
+
+| Function / constant | Description |
+|-------------------|-------------|
+| `load_model()` | Load Keras + `label2idx.json` + HolisticLandmarker; assert `input_shape[-1] == 163` |
+| `predict_frame()` | Main contract: returns `(label, confidence, emotion)` |
+| `update_emotion_async()` | DeepFace from Thread 3; writes `_cached_emotion` |
+| `_resolve_emotion()` | Read cache or use passed `cached_emotion` (sprint/web) |
+| `_extract_landmarks()` | MediaPipe → 156-dim vector |
+| `_normalize()` | Wrist/face normalization — **must match Phase 1 Cell 9** |
+| `_activation_gate()` | Hand velocity only (first 126 values) |
+| `get_last_mp_results()` | Latest Holistic result for drawing without re-running |
+| `reset_window()` | Clear voting window and motion gate |
+| `set_frame_skip(n)` | Tune `FRAME_SKIP` for speed |
+
+**Key constants:** `FACE_IDX`, `VELOCITY_THRESHOLD`, `WINDOW_SIZE`, `MIN_VOTES`, `MIN_CONFIDENCE`, `DEEPFACE_INTERVAL`, `FRAME_SKIP`.
+
+---
+
+#### `src/augmentation.py`
+
+**Purpose:** Training-time data augmentation (Phase 1) — not used directly in `demo.py`.
+
+| Function | Effect |
+|----------|--------|
+| `aug_hflip` | Horizontal flip + swap left/right hand blocks |
+| `aug_time_jitter` | Speed up/slow sequence (0.8× / 1.2×) |
+| `aug_gaussian_noise` | Gaussian noise on coordinates |
+| `aug_landmark_dropout` | Random hand joint dropout (occlusion simulation) |
+| `aug_rotation_2d` | Small rotation around wrist (optional) |
+| `augment_sequence()` | All strategies on one sequence |
+| `augment_dataset()` | Augment full `(N, T, D)` dataset |
+| `lstm_to_mlp_features()` | Mean of 5 center frames → static MLP feature |
+| `add_neutral_emotion()` | Append neutral one-hot `[0,0,0,0,1,0,0]` for training |
+
+---
+
+#### `src/evaluate.py`
+
+**Purpose:** Phase 3 evaluation — model comparison and viva figures.
+
+| Output | File |
+|--------|------|
+| Ablation table | `results/ablation_table.csv` |
+| Confusion matrix | `results/confusion_matrix.png` |
+| Per-class report | `results/classification_report.txt` |
+| Failure analysis | `results/failure_analysis.png` |
+| Memory log (optional) | `results/memory_log.csv` |
+
+**Run:** `python -m src.evaluate`
+
+---
+
+#### `src/landmark_gate.py`
+
+**Purpose:** Motion gate for **Sprint mode** only — uses `get_raw_landmarks()` without duplicating MediaPipe logic.
+
+- `gate_from_frame(frame)` → `(is_active, raw_landmarks)`.
+- Uses the same `VELOCITY_THRESHOLD` as `inference.py`.
+
+---
+
+### `demo.py`
+
+**Purpose:** Desktop application entry point.
+
+| Component | Description |
+|-----------|-------------|
+| `capture_thread` | Thread 1: read frames, `maxsize=2` queue, drop old frames |
+| `inference_thread` | Thread 2: `predict_frame` + `get_last_mp_results` |
+| `emotion_thread` | Thread 3: `update_emotion_async` every `DEEPFACE_INTERVAL` poll cycles |
+| `run()` | Full mode: load model, start threads, display loop |
+| `run_sprint()` | Single loop + `landmark_gate` + `predict_frame(..., raw=True)` |
+| `draw_status_bar` | UI: sign, confidence, emotion, FPS |
+
+**Keyboard:** Q quit, L landmarks, D debug, R reset voting window.
+
+---
+
+### `web/` folder
+
+#### `web/server.py`
+
+- **FastAPI** + **WebSocket** at `/ws`.
+- On startup: `load_model()` once.
+- Receives base64 JPEG → `cv2.imdecode` → `predict_frame(frame, cached_emotion="neutral")`.
+- Responds with JSON: `label`, `confidence`, `emotion`, `latency_ms`, `fps_hint`.
+- `/health` reports whether the model loaded.
+
+#### `web/index.html`
+
+- Simple UI: `getUserMedia` → 320×240 canvas → send JPEG every **100 ms** over WebSocket.
+- Shows status, confidence, emotion (always neutral from server).
+
+#### `web/manifest.json`
+
+- PWA metadata only (no service worker).
+
+**Run:**
 ```bash
-python scripts/smoke_check.py
+uvicorn web.server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ---
-## File Structure
+
+### `artifacts/README.md` and `artifacts/` contents
+
+| File | Description |
+|------|-------------|
+| `model_v1.keras` | Baseline MLP — no training augmentation |
+| `model_v2.keras` | **Default runtime model** — augmented MLP + emotion slot |
+| `model_v3.keras` | Bi-LSTM + augmentation + emotion — input `(30, 163)` |
+| `label2idx.json` | Sign name → class index |
+| `holistic_landmarker.task` | MediaPipe model (loaded in `load_model`) |
+| `X_mlp_train.npy`, `X_mlp_val.npy` | MLP evaluation arrays (163 dims) |
+| `X_lstm_train.npy`, `X_lstm_val.npy` | LSTM arrays `(samples, 30, 163)` |
+| `y_train.npy`, `y_val.npy` | Integer labels |
+
+---
+
+## 4. Feature Vector (163 dimensions)
+
+### Full structure
 
 ```
-esl_project/
-├── demo.py                    # Desktop app entry point
-├── run_demo.sh / run_demo.ps1
-├── run_web.sh   / run_web.ps1
-├── setup_venv.sh / setup_venv.ps1  # one-time: create .venv with 3.10/3.11 + pip install
-├── pyproject.toml              # requires-python >=3.10,<3.13
-├── .python-version             # 3.11 (pyenv / editor hint)
-├── requirements.txt
-├── scripts/
-│   ├── esl_python.ps1          # Windows: resolve 3.10/3.11 for run_*.ps1
-│   ├── export_eval_arrays.py  # Regenerates X/y arrays + y_val.npy
-│   ├── export_tflite.py       # Keras -> TFLite conversion (+ --validate)
-│   └── smoke_check.py         # Quick load_model / predict sanity (no webcam)
-│
-├── output/                    # Optional mirror for Colab / Cursor sprint imports
-│   ├── artifacts/             # copy or symlink of artifacts/
-│   └── src/inference.py       # re-exports src.inference
-├── web/
-│   ├── server.py              # FastAPI + WebSocket
-│   ├── index.html
-│   └── manifest.json          # PWA metadata only (no service worker)
-├── src/
-│   ├── inference.py           # predict_frame()
-│   ├── paths.py               # resolves artifacts/ vs output/artifacts/
-│   ├── landmark_gate.py       # sprint activation gate helpers
-│   ├── augmentation.py        # Data augmentation
-│   └── evaluate.py            # Evaluation suite
-│
-├── artifacts/                 # Primary model location (or use output/artifacts/)
-│   ├── model_v1.keras         # Baseline MLP (no augmentation)
-│   ├── model_v2.keras         # Augmented MLP + Emotion  ← PRIMARY
-│   ├── model_v3.keras         # Augmented LSTM + Emotion
-│   ├── model_v2.tflite        # Optional: produced by scripts/export_tflite.py
-│   └── label2idx.json
-├── data/
-│   ├── landmarks/             # Raw .npy per-video landmark files
-│   └── augmented_landmarks/   # Augmented sequences (flip, slow, fast, noise)
-│
-└── results/
-    ├── confusion_matrix.png
-    ├── failure_analysis.png
-    ├── ablation_table.csv
-    ├── classification_report.txt
-    ├── viva_prep.md           # Checklist template for the team
-    └── training_curves.png
+[ 156 normalized landmark values ] + [ 7 emotion one-hot values ] = 163
 ```
+
+### Part 1: 156 landmarks (raw from MediaPipe before normalization)
+
+| Segment | Index | Size | Content |
+|---------|-------|------|---------|
+| Left hand | 0 – 62 | 63 | 21 joints × (x, y, z) |
+| Right hand | 63 – 125 | 63 | 21 joints × (x, y, z) |
+| Face | 126 – 155 | 30 | 10 joints × (x, y, z) |
+
+**Face indices used** (`FACE_IDX` — order must not change):
+
+```
+[0, 1, 13, 14, 17, 33, 61, 199, 263, 291]
+```
+
+If a hand or face is not detected, that block is zero-filled.
+
+### Normalization (`_normalize`)
+
+| Part | Origin | Scale |
+|------|--------|-------|
+| Each hand | Wrist (joint 0) | Max distance from wrist |
+| Face | Centroid of 10 points | Max distance from centroid |
+
+**Warning:** Any mismatch with `normalize_frame()` in Phase 1 silently hurts accuracy.
+
+### Part 2: 7 emotion dimensions (one-hot)
+
+Class order:
+
+```
+angry, disgust, fear, happy, neutral, sad, surprise
+```
+
+Example `happy` → `[0, 0, 0, 1, 0, 0, 0]`  
+Example `neutral` → `[0, 0, 0, 0, 1, 0, 0]`
+
+- **Training (Phase 1):** Usually fixed `neutral` via `add_neutral_emotion()`.
+- **Full runtime:** DeepFace updates label → dynamic one-hot.
+- **Sprint / Web:** `cached_emotion="neutral"` always.
+
+### Why 163 and not 156?
+
+Models v2/v3 were designed to take **pose + emotional context** in one vector. `load_model()` rejects models whose last input dimension ≠ 163.
+
 ---
-## Interface Contract
+
+## 5. Emotion Detection
+
+### Approach: DeepFace on a separate thread
+
+Emotion is **not** inferred from MediaPipe landmarks in the current codebase; **DeepFace** analyzes full BGR frames.
+
+### Flow
+
+```
+Thread 3 (emotion_thread)
+    │
+    ├─ Poll every 0.05 s
+    ├─ Every DEEPFACE_INTERVAL (=5) poll cycles:
+    │       update_emotion_async(latest_frame)
+    │
+    └─ Inside inference.py:
+            DeepFace.analyze(frame, actions=["emotion"],
+                             enforce_detection=False, silent=True)
+            → dominant_emotion
+            → _cached_emotion (protected by threading.Lock)
+
+Thread 2 (predict_frame):
+    emotion_str = _resolve_emotion(cached_emotion)
+    features = concat(normalized_landmarks, one_hot(emotion_str))
+```
+
+### Technical details
+
+| Aspect | Value / behavior |
+|--------|------------------|
+| Lazy import | `from deepface import DeepFace` on first call |
+| Import failure | Function returns silently; emotion stays `neutral` |
+| Frame failure | Exception swallowed; **last successful emotion kept** |
+| `enforce_detection=False` | Analyze even with weak face detection |
+| Sign/emotion conflict | `EMOTION_CONFLICTS` scales confidence (e.g. happy sign + angry face → ×0.75) |
+
+### Frame source for DeepFace
+
+`demo.py` sets `latest_frame_ref[0]` from the **display loop** after a result arrives from Thread 2 — the displayed frame, not necessarily the newest camera frame.
+
+### Mode comparison
+
+| Mode | Emotion source |
+|------|----------------|
+| Full (`demo.py`) | DeepFace → `_cached_emotion` |
+| Sprint | Fixed `"neutral"` |
+| Web | `cached_emotion="neutral"` on every request |
+
+### Requirements
+
+- `deepface` and `tf-keras` (with TensorFlow 2.16+) in `requirements.txt`.
+- First run may download weights (~500 MB) to `~/.deepface`.
+
+---
+
+## 6. Threading
+
+### Why multiple threads?
+
+| Task | Cost | Thread |
+|------|------|--------|
+| Camera read | Low | T1 — not blocked by inference |
+| MediaPipe + Keras | High | T2 |
+| DeepFace | Very high | T3 — keeps UI responsive |
+
+### Thread 1 — Capture (`T1-Capture`)
+
+- `cv2.VideoCapture(source)`.
+- `frame_queue` size 2: when full, **drop oldest** then enqueue newest → limits lag.
+
+### Thread 2 — Inference (`T2-Inference`)
+
+- Blocks on `frame_queue.get()`.
+- Calls `predict_frame(frame)` → reads current `_cached_emotion` (updated asynchronously by T3).
+- Pushes to `result_queue`: `(frame, label, conf, emotion, frame_count, mp_results)`.
+- Same drop-old-frame policy when the queue is full.
+
+### Thread 3 — Emotion (`T3-Emotion`)
+
+- Does not consume `frame_queue` directly.
+- Reads `latest_frame_ref[0]` (mutable one-element list for cross-thread sharing).
+- `time.sleep(0.05)` → ~20 polls/s; every 5 polls → DeepFace.
+- **Note:** Counter is **poll cycles**, not literal video frame indices.
+
+### Main thread — Display
+
+- Not a separate `threading.Thread` — the main `run()` loop.
+- `result_queue.get()` → draw → `cv2.imshow` → `waitKey`.
+- Updates `latest_frame_ref` for T3.
+
+### Synchronization
+
+| Resource | Mechanism |
+|----------|-----------|
+| `_cached_emotion` | `threading.Lock` on read/write |
+| `_last_mp_results` | Written in T2; read-only in display (new object per `detect_for_video`) |
+| Shutdown | `stop_event.set()` then `join(timeout=2)` per thread |
+
+### Performance inside Thread 2
+
+- **`FRAME_SKIP = 3`:** Reuse last prediction for 2 of every 3 frames — ~3× faster with small accuracy trade-off.
+
+---
+
+## 7. Models (model_v1, v2, v3)
+
+### Comparison
+
+| Model | Architecture | Training data | Input shape | Usage |
+|-------|--------------|---------------|-------------|-------|
+| **model_v1** | MLP | No augmentation (baseline) | `(N, 163)` | Baseline in ablation |
+| **model_v2** | MLP | Augmented + neutral emotion at train time | `(N, 163)` | **Default** in `demo.py` and `load_model()` |
+| **model_v3** | Bi-LSTM | Augmented + emotion | `(N, 30, 163)` | Temporal; evaluated on `X_lstm_val` |
+
+### model_v1 — Baseline
+
+- MLP on normalized landmarks + neutral one-hot.
+- No `augmentation.py` pipeline in training.
+- Reference “before improvements” in `evaluate.py`.
+
+### model_v2 — Primary product model
+
+- Same 163 dims, trained on augmented data (flip, jitter, noise, dropout).
+- **Default path** in `_default_model_path()`.
+- Matches `predict_frame()` (single frame → landmarks → MLP).
+
+### model_v3 — LSTM
+
+- Uses **30 frames** per sample.
+- May capture motion better; heavier for live demo (not default in `demo.py`).
+- Evaluated on `X_lstm_val.npy` in `evaluate.py`.
+
+### Load-time validation
 
 ```python
-from src.inference import predict_frame
-
-# Full mode (default): uses DeepFace-cached emotion when cached_emotion is omitted
-label, confidence, emotion = predict_frame(frame)
-
-# Sprint / web: fixed neutral one-hot (no DeepFace thread required)
-label, confidence, emotion = predict_frame(frame, cached_emotion="neutral", raw=True)
-# raw=True → per-frame softmax label (use app-layer smoothing in sprint demo)
-
-# frame: BGR numpy array from cv2.VideoCapture
-# label: str — sign class, or state strings (full mode) / "__no_hands__" (raw mode)
-# confidence: float — 0.0–1.0
-# emotion: str — from DeepFace cache (full) or passed through (sprint)
+expected_dim = 156 + 7  # 163
+if model.input_shape[-1] != expected_dim:
+    raise ValueError(...)
 ```
 
-```python
-def predict_frame(frame):
-    return ("HELLO", 0.91, "happy")
-```
+Prevents loading a 156-dim-only model or LSTM into the MLP inference path by mistake.
 
----
-
-## Models
-
-| File | Description | Input dim | Val Acc* |
-|------|-------------|-----------|----------|
-| `model_v1.keras` | Baseline MLP — no augmentation, neutral-only emotion | 163 | — |
-| `model_v2.keras` | Augmented MLP + Emotion ← **use this** | 163 | — |
-| `model_v3.keras` | Augmented Bi-LSTM + Emotion | (30, 163) | — |
-
-*Fill in from `results/ablation_table.csv` after running `python -m src.evaluate`.
-
-All three variants take a 163-dim input (156 landmark features + 7-dim
-emotion one-hot). `src/inference.py` asserts this at `load_model()` time so
-pointing `MODEL_PATH` at a mismatched model fails fast instead of silently
-mispredicting.
-
----
-
-## Phase 1 — Data & Model (done)
-
-Run `ESL_Phase1_Complete.ipynb` in Google Colab.
-
-**Steps:**
-1. Kaggle dataset download
-2. Video-level 80/20 split
-3. Frame extraction at 15 FPS
-4. MediaPipe Holistic landmark extraction (156 features/frame)
-5. Normalisation (wrist-centred + scale)
-6. Augmentation: hflip, time-jitter ×2, noise, dropout → ≥2,200 sequences
-7. Emotion feature concat (neutral placeholder at train time)
-8. Train model_v1, model_v2, model_v3
-9. Ablation table, confusion matrix, failure analysis
-
-**Why video-level split?** Frame-level splitting leaks data — frames from the same video appear in both train and val, inflating accuracy. See Step 2 in the notebook.
-
----
-
-## Phase 2 — Real-Time Integration
-
-All code is in `demo.py` + `src/inference.py`.
-
-**Key design decisions:**
-- `static_image_mode=False` in MediaPipe for live video (tracks across frames → faster)
-
-- `queue.Queue(maxsize=2)` drops old frames — prevents ever-growing  
-- Activation gate (velocity threshold 0.02) — no predictions when hands are still
-- Sliding window majority vote (5 frames, ≥3 votes, ≥0.65 confidence)
-- DeepFace runs every 5 frames in its own thread — expensive, so cached (full mode only)
-
----
-
-## Phase 3 — Evaluation
-
-If the per-video landmark `.npy` files are present in `data/landmarks/` +
-`data/augmented_landmarks/` but the evaluation arrays are missing from
-`artifacts/` (e.g. `y_val.npy`), regenerate them first:
-
-```bash
-python scripts/export_eval_arrays.py
-```
-
-Then:
+### Run comparison
 
 ```bash
 python -m src.evaluate
 ```
 
-Outputs: `results/confusion_matrix.png`, `results/failure_analysis.png`,
-`results/ablation_table.csv`, `results/classification_report.txt`
+Produces `results/ablation_table.csv` with Val Acc, Macro F1, Latency (ms).
 
-For slow (CPU-only) demo machines, export TFLite:
+---
 
-```bash
-python scripts/export_tflite.py --validate
-# -> artifacts/model_v2.tflite
-# -> prints max |Keras - TFLite| drift and top-1 agreement
+## 8. How to Run the Project
+
+### Requirements
+
+- Python **3.10 or 3.11** (recommended; see `pyproject.toml`)
+- Webcam or video file
+- `artifacts/model_v2.keras`, `label2idx.json`, `holistic_landmarker.task`
+
+### Environment setup (one-time — Windows)
+
+```powershell
+cd path\to\ESL-software-ml
+.\setup_venv.ps1
 ```
 
----
+Or manually:
 
-Fill metrics into [results/viva_prep.md](results/viva_prep.md) and the table below.
+```powershell
+py -3.10 -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
 
----
+**TensorFlow + DeepFace:** You may need `tf-keras`. If import fails with `jax` / `ml-dtypes` conflicts, uninstall `jax` and `jaxlib` from the venv.
 
-## Phase 4 — Web App (optional)
+### Quick check (no camera)
 
-```bash
-# Linux / macOS / Git Bash
-./run_web.sh
+```powershell
+python scripts/smoke_check.py
+```
 
-# Windows PowerShell
+### Desktop — full mode (DeepFace emotions)
+
+```powershell
+python demo.py
+python demo.py --source 0
+python demo.py --source video.mp4
+```
+
+Or:
+
+```powershell
+.\run_demo.ps1
+```
+
+### Sprint mode (no DeepFace)
+
+```powershell
+python demo.py --sprint
+```
+
+Useful on locked-down networks or to avoid DeepFace downloads.
+
+### Evaluation (Phase 3)
+
+```powershell
+python scripts/export_eval_arrays.py   # if landmarks exist but y_val is missing
+python -m src.evaluate
+```
+
+### Web app
+
+```powershell
 .\run_web.ps1
+# or:
+uvicorn web.server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Open **http://localhost:8000** — the page serves `web/index.html` and talks to `/ws`.
-`GET /health` returns JSON with `model_loaded` (false if `model_v2.keras` is missing).
+Then open `http://localhost:8000`.
 
-For **mobile access** over HTTPS, use [ngrok](https://ngrok.com/download) on port 8000.
-The repo ships `manifest.json` only (installable shortcut) — **no service worker**, per sprint spec.
+### Keyboard shortcuts in `demo.py`
+
+| Key | Action |
+|-----|--------|
+| Q | Quit |
+| L | Toggle hand skeleton |
+| D | Debug mode |
+| R | Reset voting window |
 
 ---
 
-## Performance Targets
+## 9. Important Design Decisions
 
-| Metric | Target | How to measure |
-|--------|--------|----------------|
-| Display FPS | ≥ 15 | FPS counter in app corner |
-| Inference latency | ≤ 100ms | `src/evaluate.py` timing |
-| Web round-trip | ≤ 150ms | `web/server.py` latency log |
-| Model size (v2) | ~200 KB | `ls -lh artifacts/model_v2.keras` |
+### 1. Stable `predict_frame` contract
 
-If FPS < 10, export to TFLite:
 ```python
-import tensorflow as tf
-model = tf.keras.models.load_model("artifacts/model_v2.keras")
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-tflite_model = converter.convert()
-with open("artifacts/model_v2.tflite", "wb") as f:
-    f.write(tflite_model)
+(label: str, confidence: float, emotion: str)
+```
+
+The software team depends on this shape — changes require explicit coordination.
+
+### 2. Exact match with Phase 1
+
+- `FACE_IDX` order.
+- `_normalize()` identical to notebook Cell 9.
+- Drift degrades accuracy without a clear error.
+
+### 3. Video-level train/val split (Phase 1)
+
+Split by **video**, not frame — avoids data leakage and inflated accuracy.
+
+### 4. Motion gate on hands only
+
+Velocity uses landmarks 0:126 only — face motion (blink, speech) does not trigger prediction.
+
+### 5. Sliding-window voting
+
+- Window size 5, ≥3 votes for same label, mean confidence ≥ 0.65.
+- Reduces label flicker in full mode.
+- Sprint implements similar smoothing in `demo.py` instead of inside `inference`.
+
+### 6. DeepFace off the sign hot path
+
+Emotion is **not** computed inside `predict_frame` from landmarks — T3 + cache keeps inference fast.
+
+### 7. Small queues and frame dropping
+
+`maxsize=2` — prioritize the latest frame over processing every historical frame.
+
+### 8. Reuse MediaPipe results for drawing
+
+`get_last_mp_results()` — Holistic runs **once** per inference, not again for overlay.
+
+### 9. Resize before Holistic
+
+320×240 — balance between MediaPipe speed and landmark quality.
+
+### 10. Configurable `FRAME_SKIP`
+
+`set_frame_skip(1)` for accurate evaluation; default `3` for live demo.
+
+### 11. Fail fast on model input shape
+
+Check in `load_model()` — clearer than a shape error deep in `predict`.
+
+### 12. Neutral emotion at training time
+
+`add_neutral_emotion()` — model learns an emotion slot; runtime can fill it from DeepFace.
+
+### 13. Semantic sign/emotion conflicts
+
+`EMOTION_CONFLICTS` — lower confidence when sign and face emotion disagree.
+
+### 14. MediaPipe Tasks API (not legacy `mp.solutions`)
+
+MediaPipe ≥ 0.10.30 removed old holistic — project uses `HolisticLandmarker` + `.task` file.
+
+### 15. Flexible artifact paths
+
+`src/paths.py` supports both `artifacts/` and `output/artifacts/`.
+
+### 16. Web: CPU-only and simple
+
+`cached_emotion="neutral"` — no threads or DeepFace on the server to reduce complexity and load.
+
+---
+
+## Appendix: Repository layout
+
+```
+ESL-software-ml/
+├── demo.py                 # Desktop app
+├── PROJECT_DOCS.md         # This file
+├── requirements.txt
+├── src/
+│   ├── inference.py        # Inference + DeepFace cache
+│   ├── augmentation.py     # Data augmentation
+│   ├── evaluate.py         # Evaluation
+│   ├── paths.py            # Artifact paths
+│   └── landmark_gate.py    # Sprint motion gate
+├── web/
+│   ├── server.py
+│   └── index.html
+├── artifacts/              # Models and arrays
+└── results/                # Evaluation outputs
 ```
 
 ---
 
----
-
-## Viva Talking Points
-
-**"Why LSTM over MLP?"**
-> "We categorised all 12 MVP signs as static or dynamic. 7 signs require motion to convey meaning — these need LSTM. For the 5 static signs, MLP is sufficient and faster. Our ablation table confirms LSTM outperforms MLP on dynamic signs."
-
-**"Why MediaPipe over raw CNN?"**
-> "With only 10 videos per class, a CNN would overfit severely and need GPU. MediaPipe gives us 156 clean numbers per frame — background and lighting are stripped. Our baseline MLP runs at 50+ FPS on CPU with a 200KB model."
-
-**"What are your limitations?"**
-> "We trained on one signer. Accuracy drops ~15% on unseen signers due to hand proportion variation. Scaling to all 55 classes needs 50+ videos per class. Sentence-level recognition would need temporal segmentation and a language model."
-
----
-
-## Known Issues to avoid / take in consideration 
-- If `python scripts/smoke_check.py` prints "tensorflow not installed", switch to Python 3.11 and `pip install -r requirements.txt`.
-
-- DeepFace downloads model weights (~500MB) on first run — requires internet
-
-- Web/desktop crash when showing hands (`The packet is empty`) → upgrade MediaPipe: `pip install "mediapipe>=0.10.30,<0.11"` (venv had 0.10.14; use 0.10.30+)
-- `mp.solutions.holistic` was removed in MediaPipe 0.10.30+; this project uses `HolisticLandmarker` (tasks API) instead
-
-
+*Last updated: reflects DeepFace on Thread 3 and `model_v2.keras` as the default runtime model.*
